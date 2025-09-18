@@ -1,0 +1,245 @@
+/* Traffix - Live Traffic Monitoring Styles */
+
+body {
+    font-family: 'Inter', sans-serif;
+}
+
+#map {
+    height: 100%;
+    width: 100%;
+    z-index: 1;
+}
+
+/* This filter now only targets the map tiles, not the icons */
+.map-tiles {
+    filter: grayscale(1) invert(1) brightness(0.9);
+}
+
+.gradient-text {
+    background: -webkit-linear-gradient(#4a90e2, #9013fe);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.loading-indicator {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1000;
+    background-color: rgba(0, 0, 0, 0.7);
+    color: white;
+    padding: 15px 25px;
+    border-radius: 10px;
+    font-size: 1.2em;
+    display: none; /* Hidden by default */
+}
+
+.traffic-signal-icon {
+    background-color: transparent;
+    border: none;
+}
+
+/* Video Tab Styles */
+.video-tab {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(17, 24, 39, 0.95);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid #374151;
+    transform: translateY(100%);
+    transition: transform 0.3s ease-in-out;
+    z-index: 1000;
+}
+
+.video-tab.active {
+    transform: translateY(0);
+}
+
+.video-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+    padding: 1rem;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.video-item {
+    background: #1f2937;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #374151;
+}
+
+.video-player {
+    width: 100%;
+    height: 200px;
+    background: #000;
+    border-radius: 8px 8px 0 0;
+    overflow: hidden;
+}
+
+.video-player iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 8px 8px 0 0;
+}
+
+.video-info {
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.video-info-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.video-info-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.video-info-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.video-title {
+    font-weight: 600;
+    color: #f9fafb;
+    margin-bottom: 0.25rem;
+}
+
+.video-location {
+    font-size: 0.875rem;
+    color: #9ca3af;
+}
+
+.tab-button {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    background: #4f46e5;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.5rem;
+    font-weight: 600;
+    cursor: pointer;
+    z-index: 1001;
+    transition: all 0.2s;
+}
+
+.tab-button:hover {
+    background: #4338ca;
+    transform: translateY(-2px);
+}
+
+.close-button {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    border: none;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Object Detection Styles */
+.detection-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 100;
+}
+
+.detection-box {
+    position: absolute;
+    border: 2px solid;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 1px 3px;
+    background: transparent;
+    color: white;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.9);
+    pointer-events: none;
+    transition: all 0.1s ease;
+    white-space: nowrap;
+}
+
+.detection-box.car { border-color: #22c55e; }
+.detection-box.truck { border-color: #f97316; }
+.detection-box.bus { border-color: #3b82f6; }
+.detection-box.motorcycle { border-color: #8b5cf6; }
+.detection-box.bicycle { border-color: #06b6d4; }
+.detection-box.person { border-color: #ef4444; }
+
+.detection-stats {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.75rem;
+    z-index: 200;
+    pointer-events: none;
+    max-width: 150px;
+}
+
+.detection-toggle {
+    background: #4f46e5;
+    color: white;
+    border: none;
+    padding: 0.375rem 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    transition: all 0.2s ease;
+    min-width: 80px;
+    margin-left: auto;
+}
+
+.detection-toggle:hover {
+    background: #4338ca;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+}
+
+.detection-toggle:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.detection-toggle.active {
+    background: #22c55e;
+}
+
+.detection-toggle.active:hover {
+    background: #16a34a;
+}
