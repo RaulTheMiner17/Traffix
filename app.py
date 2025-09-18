@@ -7,7 +7,7 @@ from vidgear.gears import CamGear
 app = Flask(__name__)
 
 # Load the YOLOv8 model
-model = YOLO('yolov8l.pt')
+model = YOLO('yolov8n.pt')
 
 # Class IDs for car, bus, truck, bicycle, motorcycle 
 # bicycle: 1, car: 2, motorcycle: 3, bus: 5, truck: 7
