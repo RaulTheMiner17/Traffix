@@ -7,7 +7,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // MAP INITIALIZE
     const map = L.map('map', {
-        center: [19.0760, 72.8777], // Mumbai Coordinates
+        center: [19.0760, 72.8777], // Mumbai Coords
         zoom: 12,
         zoomControl: true,
         attributionControl: false
@@ -138,7 +138,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function createVideoPlayer(camera) {
         const videoItem = document.createElement('div');
         videoItem.className = 'video-item';
-        const streamSrc = camera.streamUrl ? `/video_feed?url=${encodeURIComponent(camera.streamUrl)}` : '';
+        const streamSrc = camera.streamUrl ? `/video_feed?id=${camera.id}` : '';
         videoItem.innerHTML = `
             <div class="video-container">
                 ${streamSrc ? `<img src="${streamSrc}" alt="${camera.name}" class="video-stream" />` : `<div class="flex items-center justify-center h-full text-gray-400">No stream URL</div>`}
