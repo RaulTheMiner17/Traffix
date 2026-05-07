@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffix - Live OSM Traffic View</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-[#121212] text-white overflow-hidden h-screen flex flex-col">
+
+    <header class="bg-black/90 border-b border-[#282828] p-3 flex justify-between items-center z-20">
+        <div>
+            <h1 class="text-xl font-bold text-[#1DB954]">Traffix</h1>
+            <p class="text-xs text-[#b3b3b3]">Live OSM Traffic View</p>
+        </div>
+        <div id="live-time" class="text-right text-lg font-mono bg-[#282828] text-[#b3b3b3] px-4 py-1 rounded-full"></div>
+    </header>
+
+    <div class="flex-grow flex overflow-hidden relative">
+        <div id="map-container" class="w-full h-full">
+            <div id="map"></div>
+        </div>
+        <div id="loading-indicator" class="loading-indicator">Loading Map Data...</div>
+    </div>
+
+    <div class="button-group">
+        <button id="video-tab-button" class="tab-button">
+            Show Cameras
+        </button>
+        <button id="dashboard-tab-button" class="tab-button">
+            📊 Metrics Dashboard
+        </button>
+    </div>
+
+    <div id="dashboard-tab" class="dashboard-tab">
+        <button id="close-dashboard-tab" class="close-button">×</button>
+        <div class="p-4 border-b border-[#282828]">
+            <h2 class="text-xl font-bold text-[#1DB954]">Real-Time Metrics Dashboard</h2>
+            <p class="text-sm text-[#b3b3b3]">Live data from YOLO detections comparing RL controller against a fixed-time baseline</p>
+        </div>
+        <div class="dashboard-content">
+            <!-- Model Info Bar -->
+            <div class="metrics-section">
+                <h3 class="section-title">Controller Status (RL / Static)</h3>
+                <div class="dashboard-stats" style="grid-template-columns: repeat(4, 1fr);">
+                    <div class="stat-card" id="model-card">
+                        <div class="stat-label">Controller(s)</div>
+                        <div class="stat-value text-[#1DB954]" id="m-model-name" style="font-size:1rem;">---</div>
+                        <div class="stat-subtext" id="m-model-type"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Uptime</div>
+                        <div class="stat-value text-[#1DB954]" id="m-uptime">0s</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Phase Switches</div>
+                        <div class="stat-value text-[#1DB954]" id="m-switches">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Vehicles on Screen</div>
+                        <div class="stat-value text-[#1DB954]" id="m-detections">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Primary Metrics -->
+            <div class="metrics-section">
+                <h3 class="section-title">Live Traffic Metrics</h3>
+                <div class="dashboard-stats primary-metrics">
+                    <div class="stat-card highlight-card">
+                        <div class="stat-label">Est. Avg Wait Time</div>
+                        <div class="stat-value text-[#1DB954]" id="m-wait">0s</div>
+                        <div class="stat-subtext">Computed from density & speed</div>
+                    </div>
+                    <div class="stat-card highlight-card">
+                        <div class="stat-label">Avg Queue Length</div>
+                        <div class="stat-value text-[#1DB954]" id="m-queue">0</div>
+                        <div class="stat-subtext">Across all directions</div>
+                    </div>
+                    <div class="stat-card highlight-card">
+                        <div class="stat-label">Throughput</div>
+                        <div class="stat-value text-[#1DB954]" id="m-throughput">0</div>
+                        <div class="stat-subtext">vehicles / min</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Secondary -->
+            <div class="metrics-section">
+                <h3 class="section-title">System Indicators</h3>
+                <div class="dashboard-stats secondary-metrics">
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Density</div>
+                        <div class="stat-value text-[#1DB954]" id="m-density">0%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Speed Factor</div>
+                        <div class="stat-value text-[#1DB954]" id="m-speed">0</div>
+                        <div class="stat-subtext">1.0 = free flow, 0.1 = standstill</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Emissions Factor</div>
+                        <div class="stat-value text-[#1DB954]" id="m-emissions">0</div>
+                        <div class="stat-subtext">Idle-time CO₂ proxy</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-Direction Breakdown -->
+            <div class="metrics-section">
+                <h3 class="section-title">Per-Direction Detections</h3>
+                <div class="dashboard-stats" style="grid-template-columns: repeat(4, 1fr);">
+                    <div class="stat-card"><div class="stat-label">North</div><div class="stat-value text-[#1DB954]" id="m-dir-N">0</div></div>
+                    <div class="stat-card"><div class="stat-label">South</div><div class="stat-value text-[#1DB954]" id="m-dir-S">0</div></div>
+                    <div class="stat-card"><div class="stat-label">East</div><div class="stat-value text-[#1DB954]" id="m-dir-E">0</div></div>
+                    <div class="stat-card"><div class="stat-label">West</div><div class="stat-value text-[#1DB954]" id="m-dir-W">0</div></div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="dashboard-grid">
+                <div class="chart-container">
+                    <h3 class="text-lg font-semibold mb-2">Throughput & Queue (Timeline)</h3>
+                    <canvas id="timelineChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3 class="text-lg font-semibold mb-2">Density & Wait Time (Timeline)</h3>
+                    <canvas id="densityWaitChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Info -->
+            <div class="stats-info">
+                <div class="info-card">
+                    <h4 class="info-title">How Metrics Are Computed</h4>
+                    <ul class="info-list">
+                        <li><strong>Vehicle Count:</strong> YOLO11n detections (cars, bikes, buses, trucks)</li>
+                        <li><strong>Queue:</strong> Vehicles counted when density > 60%</li>
+                        <li><strong>Density:</strong> count / max_capacity (20 vehicles)</li>
+                        <li><strong>Wait Time:</strong> density × (1 - speed_factor) × 120s</li>
+                        <li><strong>Throughput:</strong> Total vehicles per minute (rolling window)</li>
+                    </ul>
+                </div>
+                <div class="info-card">
+                    <h4 class="info-title">RL Decision Pipeline</h4>
+                    <ul class="info-list">
+                        <li><strong>Observation:</strong> 15-dim vector (4× queue, density, speed + phase + time)</li>
+                        <li><strong>Model:</strong> PPO with VecNormalize (or max-pressure fallback)</li>
+                        <li><strong>Actions:</strong> 0 = NS Green, 1 = EW Green</li>
+                        <li><strong>Sub-phases:</strong> Left Turn (5s) → Straight (8s) → Right Turn (4s) → Yellow (3s)</li>
+                        <li class="mt-2"><em>Static baseline uses a simple fixed 30‑second cycle for comparison.</em></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="video-tab" class="video-tab">
+        <button id="close-video-tab" class="close-button">×</button>
+        <div class="p-4 border-b border-[#282828]">
+            <h2 class="text-xl font-bold text-[#1DB954]">Live Traffic Cameras</h2>
+            <p class="text-sm text-[#b3b3b3]">Real-time video feeds</p>
+        </div>
+        <div id="video-grid" class="video-grid">
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

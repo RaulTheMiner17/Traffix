@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+  <vType id="car" accel="2.0" decel="4.5" sigma="0.5" length="5.0" maxSpeed="13.9"/>
+
+  <!-- Straight-through routes -->
+  <route id="N2S" edges="N2J J2S"/>
+  <route id="S2N" edges="S2J J2N"/>
+  <route id="E2W" edges="E2J J2W"/>
+  <route id="W2E" edges="W2J J2E"/>
+
+  <!-- Right-turn routes (yielding, no oncoming conflict) -->
+  <route id="N2W_R" edges="N2J J2W"/>
+  <route id="S2E_R" edges="S2J J2E"/>
+  <route id="E2N_R" edges="E2J J2N"/>
+  <route id="W2S_R" edges="W2J J2S"/>
+
+  <!-- Left-turn routes (cross oncoming: need protected phase) -->
+  <route id="N2E_L" edges="N2J J2E"/>
+  <route id="S2W_L" edges="S2J J2W"/>
+  <route id="E2S_L" edges="E2J J2S"/>
+  <route id="W2N_L" edges="W2J J2N"/>
+
+  <!-- Straight-through flows (primary demand) -->
+  <flow id="f_N2S" type="car" route="N2S" begin="0" end="3600" probability="0.12"/>
+  <flow id="f_S2N" type="car" route="S2N" begin="0" end="3600" probability="0.12"/>
+  <flow id="f_E2W" type="car" route="E2W" begin="0" end="3600" probability="0.12"/>
+  <flow id="f_W2E" type="car" route="W2E" begin="0" end="3600" probability="0.12"/>
+
+  <!-- Right-turn flows (~30% of straight volume) -->
+  <flow id="f_N2W_R" type="car" route="N2W_R" begin="0" end="3600" probability="0.04"/>
+  <flow id="f_S2E_R" type="car" route="S2E_R" begin="0" end="3600" probability="0.04"/>
+  <flow id="f_E2N_R" type="car" route="E2N_R" begin="0" end="3600" probability="0.04"/>
+  <flow id="f_W2S_R" type="car" route="W2S_R" begin="0" end="3600" probability="0.04"/>
+
+  <!-- Left-turn flows (~25% of straight volume) -->
+  <flow id="f_N2E_L" type="car" route="N2E_L" begin="0" end="3600" probability="0.03"/>
+  <flow id="f_S2W_L" type="car" route="S2W_L" begin="0" end="3600" probability="0.03"/>
+  <flow id="f_E2S_L" type="car" route="E2S_L" begin="0" end="3600" probability="0.03"/>
+  <flow id="f_W2N_L" type="car" route="W2N_L" begin="0" end="3600" probability="0.03"/>
+</routes>

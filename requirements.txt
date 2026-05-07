@@ -1,0 +1,9 @@
+flask
+opencv-python
+numpy
+ultralytics
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+gymnasium
+stable-baselines3

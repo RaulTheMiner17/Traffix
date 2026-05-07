@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nodes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/nodes_file.xsd">
+  <!-- intersection center -->
+  <node id="J0" x="0.0"  y="0.0" type="traffic_light"/>
+  <!-- incoming/outgoing end-points -->
+  <node id="N_in"  x="0.0"   y="100.0" type="priority"/>
+  <node id="N_out" x="0.0"   y="150.0" type="priority"/>
+  <node id="S_in"  x="0.0"   y="-100.0" type="priority"/>
+  <node id="S_out" x="0.0"   y="-150.0" type="priority"/>
+  <node id="E_in"  x="100.0" y="0.0" type="priority"/>
+  <node id="E_out" x="150.0" y="0.0" type="priority"/>
+  <node id="W_in"  x="-100.0" y="0.0" type="priority"/>
+  <node id="W_out" x="-150.0" y="0.0" type="priority"/>
+</nodes>
