@@ -257,7 +257,7 @@ def linear_schedule(initial_lr: float, final_lr: float = 1e-5):
 
 
 def train_best_model():
-    TOTAL_TIMESTEPS = 1_000_000
+    TOTAL_TIMESTEPS = 500_000
 
     # ------------------------------------------------------------------
     # 1. Vectorised training environment
