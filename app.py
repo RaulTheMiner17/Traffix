@@ -52,6 +52,15 @@ VEHICLE_WEIGHTS = {
     5: 3.0,  # Bus
     7: 2.5   # Truck
 }
+
+# Define the invisible lane divider lines for each camera: ((top_x, top_y), (bottom_x, bottom_y))
+# You can rotate or shift the lanes by changing the x coordinates here!
+LANE_DIVIDERS = {
+    'camera-E': ((250, 0), (350, 360)),
+    'camera-W': ((270, 0), (360, 360)),
+    'camera-N': ((320, 0), (320, 360)),
+    'camera-S': ((320, 0), (320, 360)),
+}
 yolo_lock = threading.Lock()
 
 CAMERAS = [
@@ -406,6 +415,7 @@ class SimpleTracker:
 
     def update(self, rects_data):
         new_objects = {}
+        active_objects = {}
         available_objects = dict(self.objects)
         
         for item in rects_data:
@@ -413,7 +423,7 @@ class SimpleTracker:
             cls = item[4]
             cx, cy = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
             matched_id = None
-            min_dist = 60
+            min_dist = 120
             
             for obj_id, (o_rect, o_cls) in available_objects.items():
                 ocx, ocy = (o_rect[0] + o_rect[2]) / 2, (o_rect[1] + o_rect[3]) / 2
@@ -424,6 +434,7 @@ class SimpleTracker:
             
             if matched_id is not None:
                 new_objects[matched_id] = (rect, cls)
+                active_objects[matched_id] = (rect, cls)
                 self.history[matched_id].append((cx, cy))
                 if len(self.history[matched_id]) > 10:
                     self.history[matched_id].pop(0)
@@ -431,20 +442,21 @@ class SimpleTracker:
                 del available_objects[matched_id]
             else:
                 new_objects[self.next_id] = (rect, cls)
+                active_objects[self.next_id] = (rect, cls)
                 self.history[self.next_id] = [(cx, cy)]
                 self.disappeared[self.next_id] = 0
                 self.next_id += 1
                 
         for obj_id, (o_rect, o_cls) in available_objects.items():
             self.disappeared[obj_id] += 1
-            if self.disappeared[obj_id] <= 5:
+            if self.disappeared[obj_id] <= 2:
                 new_objects[obj_id] = (o_rect, o_cls) 
             else:
                 if obj_id in self.history: del self.history[obj_id]
                 del self.disappeared[obj_id]
                 
         self.objects = new_objects
-        return self.objects, self.history
+        return active_objects, self.history
 
 def process_camera_stream(camera_info):
     global output_frames, lock, vehicle_data
@@ -464,7 +476,7 @@ def process_camera_stream(camera_info):
             time.sleep(5)
             continue
 
-        FRAME_SKIP = 3 
+        FRAME_SKIP = 6 
         frame_count = 0
 
         while True:
@@ -520,10 +532,15 @@ def process_camera_stream(camera_info):
                     base_color = (0, 255, 0)
                 else:
                     base_color = (0, 0, 255)
+                    
+                # The invisible lane divider line (uncomment the line below if you ever need to visually debug them again)
+                pt1, pt2 = LANE_DIVIDERS.get(camera_id, ((320, 0), (320, 360)))
+                # cv2.line(frame_resized, pt1, pt2, (255, 0, 255), 1)
                 
                 for obj_id, (rect, cls) in objects.items():
                     x1, y1, x2, y2 = [int(v) for v in rect]
                     cx = (x1 + x2) / 2
+                    cy = (y1 + y2) / 2
                     
                     hist = history.get(obj_id, [])
                     
@@ -535,23 +552,25 @@ def process_camera_stream(camera_info):
                         if abs(dy) > 3 or abs(dx) > 3:
                             is_moving = True
                             
-                    # Filter out non-moving vehicles parked on the far edges
-                    if not is_moving and (cx < 120 or cx > 520):
+                    # Calculate dynamic divider_x based on the configurable LANE_DIVIDERS
+                    divider_x = pt1[0] + (cy / 360.0) * (pt2[0] - pt1[0])
+                            
+                    # Filter out non-moving vehicles parked on the far edges (relative to the actual road center)
+                    if not is_moving and abs(cx - divider_x) > 220:
                         continue
                         
-                    direction = "Unknown"
+                    # Primary Logic: The Invisible Line (Lane Position)
+                    if cx < divider_x:
+                        direction = "Outgoing"
+                    else:
+                        direction = "Incoming"
+                        
+                    # Override ONLY if they are blatantly driving on the wrong side of the road (India traffic)
                     if is_moving:
-                        if dy < -2:
-                            direction = "Outgoing"
-                        elif dy > 2:
-                            direction = "Incoming"
-                            
-                    # If stationary or moving horizontally, fallback to lane position (LHD system)
-                    if direction == "Unknown":
-                        if cx < 320:
-                            direction = "Outgoing"
-                        else:
-                            direction = "Incoming"
+                        if direction == "Outgoing" and dy > 6:
+                            direction = "Incoming" # Wrong way towards intersection
+                        elif direction == "Incoming" and dy < -6:
+                            direction = "Outgoing" # Wrong way away from intersection
                     
                     if direction == "Outgoing":
                         count_outgoing += 1
