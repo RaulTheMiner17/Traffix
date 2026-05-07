@@ -4,7 +4,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const videoTabButton = document.getElementById('video-tab-button');
     const closeVideoTab = document.getElementById('close-video-tab');
     const videoGrid = document.getElementById('video-grid');
-    
+
     // Dashboard elements
     const dashboardTab = document.getElementById('dashboard-tab');
     const dashboardTabButton = document.getElementById('dashboard-tab-button');
@@ -46,8 +46,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 datasets: [
                     { label: 'Vehicles Now (RL)', data: [], borderColor: '#1DB954', backgroundColor: 'rgba(29,185,84,0.1)', fill: true, tension: 0.3 },
                     { label: 'Avg Queue (RL)', data: [], borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Vehicles Now (Static)', data: [], borderColor: '#1DB954', borderDash: [5,5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
-                    { label: 'Avg Queue (Static)', data: [], borderColor: '#f97316', borderDash: [5,5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
+                    { label: 'Vehicles Now (Static)', data: [], borderColor: '#1DB954', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
+                    { label: 'Avg Queue (Static)', data: [], borderColor: '#f97316', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
                 ]
             },
             options: chartOpts
@@ -60,8 +60,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 datasets: [
                     { label: 'Density (%) (RL)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3 },
                     { label: 'Wait Time (s) (RL)', data: [], borderColor: '#fbbf24', backgroundColor: 'rgba(251,191,36,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Density (%) (Static)', data: [], borderColor: '#ef4444', borderDash: [5,5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
-                    { label: 'Wait Time (s) (Static)', data: [], borderColor: '#fbbf24', borderDash: [5,5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
+                    { label: 'Density (%) (Static)', data: [], borderColor: '#ef4444', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
+                    { label: 'Wait Time (s) (Static)', data: [], borderColor: '#fbbf24', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
                 ]
             },
             options: chartOpts
@@ -111,7 +111,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (el('m-emissions')) el('m-emissions').textContent = `${rt_rl.idle_emissions_factor.toFixed(3)} / ${rt_static.idle_emissions_factor.toFixed(3)}`;
 
                 // Per-direction counts (same for both systems)
-                ['N','S','E','W'].forEach(dir => {
+                ['N', 'S', 'E', 'W'].forEach(dir => {
                     const dirEl = el('m-dir-' + dir);
                     if (dirEl) dirEl.textContent = (d.rl.per_direction[dir] || 0).toLocaleString();
                 });
@@ -145,9 +145,11 @@ document.addEventListener('DOMContentLoaded', function () {
     setTimeout(updateDashboard, 1500);
 
     // MAP INITIALIZE
+    const JUHU_CENTER = [19.10711753017639, 72.82994390098155];
+
     const map = L.map('map', {
-        center: [19.0760, 72.8777],
-        zoom: 12,
+        center: JUHU_CENTER,
+        zoom: 17,
         zoomControl: true,
         attributionControl: false
     });
@@ -234,7 +236,7 @@ document.addEventListener('DOMContentLoaded', function () {
         videoItem.className = 'video-item';
         // Add random query param to force image refresh when switching sources
         const streamSrc = `/video_feed?id=${camera.id}&t=${Date.now()}`;
-        
+
         videoItem.innerHTML = `
             <div class="video-container">
                 <img src="${streamSrc}" alt="${camera.name}" class="video-stream" onerror="this.onerror=null;this.src='placeholder.jpg';"/>
@@ -309,7 +311,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const phase = data.rl ? data.rl.current_phase_code : data.current_phase_code;
                 const isYellowFlag = data.rl ? data.rl.is_yellow : data.is_yellow;
                 const currentSubPhase = data.rl ? data.rl.sub_phase : data.sub_phase;
-                const currentTimer = Math.floor(data.rl ? (data.rl.state_timer||0) : (data.state_timer||0));
+                const currentTimer = Math.floor(data.rl ? (data.rl.state_timer || 0) : (data.state_timer || 0));
 
                 document.querySelectorAll('.pressure-bar-container').forEach(container => {
                     const camId = container.dataset.cameraId;
@@ -337,7 +339,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     const timerEl = videoItem.querySelector('[data-signal-timer]');
                     const dir = camId.replace('camera-', '');
                     const isGreenDir = (phase === 0 && (dir === 'N' || dir === 'S')) ||
-                                      (phase === 1 && (dir === 'E' || dir === 'W'));
+                        (phase === 1 && (dir === 'E' || dir === 'W'));
                     const isYellow = isYellowFlag;
                     const subPhase = currentSubPhase;
                     const timer = currentTimer;
@@ -396,4 +398,87 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     setInterval(updatePressureBars, 1000);
     setTimeout(updatePressureBars, 2000);
+
+    // =====================================================
+    //  TRAFFIC OVERLAY — on main map (8 road segments)
+    // =====================================================
+    // 8 segments: incoming + outgoing for each of 4 directions
+    // Coordinates from OpenStreetMap inspection. India = left-hand drive.
+    // N-S road: Guru Nanak Rd — center lon ~72.82992, lanes offset ±0.00005
+    // E-W road: Indravadan Oza Rd — center lat ~19.10715, lanes offset ±0.00004
+    const ROAD_SEGMENTS = [
+        // NORTH ARM — Guru Nanak Rd
+        { name: 'North Incoming', direction: 'N', flow: 'in', coords: [[19.10793, 72.82998], [19.10760, 72.82998], [19.10740, 72.82998], [19.10725, 72.82998]] },
+        { name: 'North Outgoing', direction: 'N', flow: 'out', coords: [[19.10725, 72.82987], [19.10740, 72.82987], [19.10760, 72.82987], [19.10793, 72.82987]] },
+        // SOUTH ARM — Guru Nanak Rd
+        { name: 'South Incoming', direction: 'S', flow: 'in', coords: [[19.10642, 72.82986], [19.10660, 72.82986], [19.10685, 72.82987], [19.10705, 72.82987]] },
+        { name: 'South Outgoing', direction: 'S', flow: 'out', coords: [[19.10705, 72.829985], [19.10685, 72.829985], [19.10660, 72.829980], [19.10642, 72.829975]] },
+        // EAST ARM — Indravadan Oza Rd
+        { name: 'East Incoming', direction: 'E', flow: 'in', coords: [[19.107094, 72.83085], [19.107094, 72.83055], [19.107090, 72.83025], [19.107090, 72.83002]] },
+        { name: 'East Outgoing', direction: 'E', flow: 'out', coords: [[19.10717, 72.83002], [19.10717, 72.83025], [19.10717, 72.83055], [19.10717, 72.83085]] },
+        // WEST ARM — Indravadan Oza Rd
+        { name: 'West Incoming', direction: 'W', flow: 'in', coords: [[19.10717, 72.82922], [19.10717, 72.82945], [19.10717, 72.82965], [19.10717, 72.82982]] },
+        { name: 'West Outgoing', direction: 'W', flow: 'out', coords: [[19.10710, 72.82982], [19.10710, 72.82965], [19.10710, 72.82945], [19.10710, 72.82922]] },
+    ];
+
+    let trafficLines = [];
+    let currentMapMode = 'ai';
+
+    function getDensityForDirection(metricsData, direction, flow, mode) {
+        if (!metricsData) return 50;
+        let density = mode === 'ai'
+            ? (metricsData.rl?.realtime?.avg_density_pct ?? 50)
+            : (metricsData.static?.realtime?.avg_density_pct ?? 50);
+        const perDir = metricsData.rl?.per_direction || {};
+        const total = Object.values(perDir).reduce((a, b) => a + b, 0) || 1;
+        const ratio = (perDir[direction] || 0) / total;
+        let dirDensity = density * 0.6 + (ratio * 4 * density * 0.4);
+        // Outgoing lanes have lower density (traffic flowing out)
+        if (flow === 'out') dirDensity *= 0.5;
+        return mode === 'static' ? Math.min(dirDensity * 1.38, 100) : dirDensity;
+    }
+
+    function densityToColor(d) {
+        if (d < 35) return '#22c55e';
+        if (d < 60) return '#f97316';
+        return '#ef4444';
+    }
+
+    function drawTrafficOverlay(metricsData) {
+        trafficLines.forEach(l => map.removeLayer(l));
+        trafficLines = [];
+        ROAD_SEGMENTS.forEach(seg => {
+            const density = getDensityForDirection(metricsData, seg.direction, seg.flow, currentMapMode);
+            const color = densityToColor(density);
+            const weight = density < 35 ? 3 : density < 60 ? 4 : 5;
+            const shadow = L.polyline(seg.coords, { color: 'rgba(0,0,0,0.45)', weight: weight + 2, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(map);
+            const line = L.polyline(seg.coords, { color, weight, lineCap: 'round', lineJoin: 'round', opacity: 0.93 }).addTo(map);
+            line.bindTooltip(`<b>${seg.name}</b><br>Density: ${density.toFixed(1)}%<br>${currentMapMode === 'ai' ? '\ud83e\udde0 AI (PPO)' : '\u23f1 Fixed Timer'}`, { sticky: true });
+            trafficLines.push(shadow, line);
+        });
+    }
+
+    function refreshTrafficOverlay() {
+        fetch('/api/metrics')
+            .then(r => r.json())
+            .then(data => drawTrafficOverlay(data))
+            .catch(() => drawTrafficOverlay(null));
+    }
+
+    // Toggle buttons
+    const overlayToggleAi = document.getElementById('overlay-toggle-ai');
+    const overlayToggleStatic = document.getElementById('overlay-toggle-static');
+
+    function setOverlayMode(mode) {
+        currentMapMode = mode;
+        overlayToggleAi && overlayToggleAi.classList.toggle('active', mode === 'ai');
+        overlayToggleStatic && overlayToggleStatic.classList.toggle('active', mode === 'static');
+        refreshTrafficOverlay();
+    }
+
+    if (overlayToggleAi) overlayToggleAi.addEventListener('click', () => setOverlayMode('ai'));
+    if (overlayToggleStatic) overlayToggleStatic.addEventListener('click', () => setOverlayMode('static'));
+
+    refreshTrafficOverlay();
+    setInterval(refreshTrafficOverlay, 4000);
 });

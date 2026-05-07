@@ -172,6 +172,14 @@
         </div>
     </div>
 
+    <!-- Traffic Overlay: floating toggle on the right of the main map -->
+    <div id="traffic-overlay-panel">
+        <div class="overlay-toggle">
+            <button id="overlay-toggle-ai" class="toggle-btn active">🧠 AI Model</button>
+            <button id="overlay-toggle-static" class="toggle-btn">⏱ Fixed Timer</button>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     
     <script src="{{ url_for('static', filename='app.js') }}"></script>

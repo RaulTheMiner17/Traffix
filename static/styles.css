@@ -612,3 +612,47 @@ body {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
 }
+
+/* ============ Traffic Overlay Toggle ============ */
+#traffic-overlay-panel {
+    position: fixed;
+    top: 4.5rem;
+    right: 1rem;
+    z-index: 500;
+    background: rgba(18, 18, 18, 0.93);
+    border: 1px solid #282828;
+    border-radius: 500px;
+    padding: 3px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+}
+
+.overlay-toggle {
+    display: flex;
+    gap: 2px;
+}
+
+.toggle-btn {
+    padding: 0.5rem 1.1rem;
+    border: none;
+    border-radius: 500px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: #b3b3b3;
+    background: transparent;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.toggle-btn.active {
+    background: #1DB954;
+    color: #000;
+    box-shadow: 0 2px 8px rgba(29,185,84,0.3);
+}
+
+.toggle-btn:not(.active):hover {
+    color: #fff;
+    background: rgba(255,255,255,0.08);
+}
