@@ -1,61 +1,46 @@
 """
 plot_results.py
 ===============
-Generates PNG comparison charts between:
-  - Old PPO run  (ppo_traffic_tensorboard/)   – 2-phase: NS / EW only
-  - New PPO run  (traffic_tensorboard/)        – 4-phase: NS-str, NS-left, EW-str, EW-left
+Compares two PPO models by:
+  1. Plotting the training reward curve from evaluations.npz
+  2. Running both models head-to-head in the SUMO environment
+  3. Generating comparison charts (bar + line)
 
-Also reads logs/evaluations.npz produced by EvalCallback.
+Models:
+  - "Final"  (ppo_traffic_final.zip)          — the last checkpoint (1M steps)
+  - "Best"   (logs/best_model/best_model.zip) — saved by EvalCallback at peak
 
-Output files (saved to ./plots/):
-  01_reward_comparison.png
-  02_policy_loss_comparison.png
-  03_value_loss_comparison.png
-  04_entropy_comparison.png
-  05_eval_rewards.png
-  06_eval_episode_lengths.png
-  07_training_summary.png        ← single combined dashboard
+Output: ./plots/
 """
 
 import os
-import glob
+import sys
+import random
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")          # no GUI needed
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from collections import defaultdict
-
-# ── optional TensorBoard reader ──────────────────────────────────────────────
-try:
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-    HAS_TB = True
-except ImportError:
-    HAS_TB = False
-    print("[WARN] 'tensorboard' package not found – TensorBoard curves will be skipped.")
-    print("       Install with:  pip install tensorboard")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Paths (relative to this file's directory)
+# Paths
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-OLD_TB    = os.path.join(BASE_DIR, "ppo_traffic_tensorboard")   # 2-phase runs
-NEW_TB    = os.path.join(BASE_DIR, "traffic_tensorboard")       # 4-phase runs
-EVAL_NPZ  = os.path.join(BASE_DIR, "logs", "evaluations.npz")
-OUT_DIR   = os.path.join(BASE_DIR, "plots")
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_1000000_steps.zip")
+BEST_MODEL  = os.path.join(BASE_DIR, "logs", "best_model", "best_model.zip")
+EVAL_NPZ    = os.path.join(BASE_DIR, "logs", "evaluations.npz")
+VEC_NORM    = os.path.join(BASE_DIR, "vec_normalize.pkl")
+OUT_DIR     = os.path.join(BASE_DIR, "plots")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 COLORS = {
-    "old": "#E07B39",   # orange  – old 2-phase model
-    "new": "#2E8BC0",   # blue    – new 4-phase model
+    "final": "#E07B39",   # orange
+    "best":  "#2E8BC0",   # blue
+    "green": "#22c55e",
 }
-STYLE = {"linewidth": 1.8, "alpha": 0.9}
 
 def smooth(values, weight=0.85):
-    """Exponential moving average (same as TensorBoard's smoothing slider)."""
+    """Exponential moving average."""
     smoothed, last = [], values[0]
     for v in values:
         last = last * weight + v * (1 - weight)
@@ -63,240 +48,286 @@ def smooth(values, weight=0.85):
     return np.array(smoothed)
 
 
-def load_tb_scalar(log_dir: str, tag: str):
-    """
-    Walk all event files under log_dir, collect (step, value) pairs for `tag`.
-    Merges multiple PPO_* sub-runs by offsetting steps.
-    Returns (steps_array, values_array) or (None, None) if unavailable.
-    """
-    if not HAS_TB or not os.path.isdir(log_dir):
-        return None, None
-
-    event_files = sorted(glob.glob(os.path.join(log_dir, "**", "events.out.tfevents.*"),
-                                   recursive=True))
-    all_steps, all_vals = [], []
-    step_offset = 0
-    prev_max_step = 0
-
-    for ef in event_files:
-        ea = EventAccumulator(ef)
-        ea.Reload()
-        if tag not in ea.Tags().get("scalars", []):
-            continue
-        events = ea.Scalars(tag)
-        for e in events:
-            all_steps.append(e.step + step_offset)
-            all_vals.append(e.value)
-        if events:
-            prev_max_step = max(e.step for e in events)
-        step_offset += prev_max_step
-
-    if not all_steps:
-        return None, None
-
-    # Sort by step (multiple files can interleave)
-    pairs = sorted(zip(all_steps, all_vals))
-    steps = np.array([p[0] for p in pairs])
-    vals  = np.array([p[1] for p in pairs])
-    return steps, vals
-
-
-def plot_scalar_comparison(tag, label, filename, ylabel=None, lower_is_better=False):
-    """Plot one TB scalar: old (orange) vs new (blue), save PNG."""
-    old_steps, old_vals = load_tb_scalar(OLD_TB, tag)
-    new_steps, new_vals = load_tb_scalar(NEW_TB, tag)
-
-    if old_steps is None and new_steps is None:
-        print(f"  [SKIP] No data for tag '{tag}'")
-        return
-
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-
-    if old_steps is not None:
-        ax.plot(old_steps, smooth(old_vals), color=COLORS["old"],
-                label="Old model (2-phase)", **STYLE)
-        ax.plot(old_steps, old_vals, color=COLORS["old"], alpha=0.15, linewidth=0.8)
-
-    if new_steps is not None:
-        ax.plot(new_steps, smooth(new_vals), color=COLORS["new"],
-                label="New model (4-phase + left turns)", **STYLE)
-        ax.plot(new_steps, new_vals, color=COLORS["new"], alpha=0.15, linewidth=0.8)
-
-    # Highlight final-value annotations
-    def annotate_final(steps, vals, color):
-        if steps is None:
-            return
-        final_step, final_val = steps[-1], smooth(vals)[-1]
-        ax.annotate(f"{final_val:.3f}",
-                    xy=(final_step, final_val),
-                    xytext=(8, 0), textcoords="offset points",
-                    color=color, fontsize=9, fontweight="bold")
-
-    annotate_final(old_steps, old_vals, COLORS["old"])
-    annotate_final(new_steps, new_vals, COLORS["new"])
-
-    ax.set_title(label, fontsize=13, fontweight="bold")
-    ax.set_xlabel("Training steps", fontsize=11)
-    ax.set_ylabel(ylabel or label, fontsize=11)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.35)
-
-    hint = "↓ lower is better" if lower_is_better else "↑ higher is better"
-    ax.text(0.98, 0.02, hint, transform=ax.transAxes,
-            fontsize=9, color="grey", ha="right", va="bottom")
-
-    plt.tight_layout()
-    out = os.path.join(OUT_DIR, filename)
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"  Saved: {out}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1-6  Individual comparison plots
-# ─────────────────────────────────────────────────────────────────────────────
-TAGS = [
-    # (TB tag,                              title,                     filename,                       ylabel,           lower_better)
-    ("rollout/ep_rew_mean",      "Episode Reward (Mean)",       "01_reward_comparison.png",      "Mean reward",     False),
-    ("train/policy_gradient_loss","Policy Loss",               "02_policy_loss_comparison.png", "Policy loss",     True),
-    ("train/value_loss",         "Value Loss",                  "03_value_loss_comparison.png",  "Value loss",      True),
-    ("train/entropy_loss",       "Entropy (Exploration Level)", "04_entropy_comparison.png",     "Entropy",         False),
-    ("rollout/ep_len_mean",      "Mean Episode Length",         "05_ep_len_comparison.png",      "Steps / episode", False),
-]
-
-print("\n[1/3] Generating per-metric comparison charts …")
-for tag, title, fname, ylbl, low in TAGS:
-    plot_scalar_comparison(tag, title, fname, ylbl, low)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5 & 6  EvalCallback NPZ plots
-# ─────────────────────────────────────────────────────────────────────────────
-print("\n[2/3] Generating evaluation reward plots from evaluations.npz …")
-if os.path.isfile(EVAL_NPZ):
-    data = np.load(EVAL_NPZ)
-    timesteps   = data["timesteps"]              # (n_evals,)
-    ep_rewards  = data["results"]                # (n_evals, n_eval_episodes)
-    ep_lengths  = data.get("ep_lengths", None)   # (n_evals, n_eval_episodes) or None
-
-    mean_rew = ep_rewards.mean(axis=1)
-    std_rew  = ep_rewards.std(axis=1)
-    best_ts  = timesteps[np.argmax(mean_rew)]
-    best_rew = mean_rew.max()
-
-    # -- Eval rewards over time --
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(timesteps, mean_rew, color=COLORS["new"], label="New model (eval mean)", **STYLE)
-    ax.fill_between(timesteps, mean_rew - std_rew, mean_rew + std_rew,
-                    color=COLORS["new"], alpha=0.2, label="±1 std")
-    ax.axvline(best_ts, color="green", linestyle="--", linewidth=1.2,
-               label=f"Best eval @ step {best_ts:,}")
-    ax.set_title("Evaluation Reward Over Training (New 4-Phase Model)",
-                 fontsize=13, fontweight="bold")
-    ax.set_xlabel("Training steps", fontsize=11)
-    ax.set_ylabel("Episode reward", fontsize=11)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.35)
-    ax.text(0.98, 0.02, f"Best mean reward: {best_rew:.1f}",
-            transform=ax.transAxes, fontsize=10, color="green",
-            ha="right", va="bottom", fontweight="bold")
-    plt.tight_layout()
-    out = os.path.join(OUT_DIR, "06_eval_rewards.png")
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"  Saved: {out}")
-
-    # -- Eval episode lengths --
-    if ep_lengths is not None:
-        mean_len = ep_lengths.mean(axis=1)
-        std_len  = ep_lengths.std(axis=1)
-        fig, ax  = plt.subplots(figsize=(10, 4.5))
-        ax.plot(timesteps, mean_len, color=COLORS["new"], **STYLE)
-        ax.fill_between(timesteps, mean_len - std_len, mean_len + std_len,
-                        color=COLORS["new"], alpha=0.2)
-        ax.set_title("Evaluation Episode Length Over Training",
-                     fontsize=13, fontweight="bold")
-        ax.set_xlabel("Training steps", fontsize=11)
-        ax.set_ylabel("Steps per episode", fontsize=11)
-        ax.grid(True, alpha=0.35)
-        plt.tight_layout()
-        out = os.path.join(OUT_DIR, "07_eval_ep_lengths.png")
-        plt.savefig(out, dpi=150)
-        plt.close()
-        print(f"  Saved: {out}")
-else:
-    print("  [SKIP] evaluations.npz not found (run training first).")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7  Combined dashboard (4-panel)
-# ─────────────────────────────────────────────────────────────────────────────
-print("\n[3/3] Generating combined dashboard …")
-
-fig = plt.figure(figsize=(16, 10))
-fig.suptitle("Traffic RL Model – Old (2-Phase)  vs  New (4-Phase with Left Turns)",
-             fontsize=15, fontweight="bold", y=1.01)
-gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.32)
-
-dashboard_tags = [
-    ("rollout/ep_rew_mean",       "Episode Reward (↑ better)", False),
-    ("train/value_loss",          "Value Loss (↓ better)",     True),
-    ("train/policy_gradient_loss","Policy Loss (↓ better)",    True),
-    ("train/entropy_loss",        "Entropy (exploration)",     False),
-]
-
-for idx, (tag, title, low) in enumerate(dashboard_tags):
-    row, col = divmod(idx, 2)
-    ax = fig.add_subplot(gs[row, col])
-
-    old_steps, old_vals = load_tb_scalar(OLD_TB, tag)
-    new_steps, new_vals = load_tb_scalar(NEW_TB, tag)
-
-    if old_steps is not None:
-        ax.plot(old_steps, smooth(old_vals), color=COLORS["old"],
-                label="Old (2-phase)", linewidth=1.6, alpha=0.9)
-    if new_steps is not None:
-        ax.plot(new_steps, smooth(new_vals), color=COLORS["new"],
-                label="New (4-phase)", linewidth=1.6, alpha=0.9)
-
-    ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.set_xlabel("Steps", fontsize=9)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-# Append eval reward curve as a 5th sub-plot spanning full bottom width
+# ═════════════════════════════════════════════════════════════════════════════
+# PART 1: Training curve from evaluations.npz
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n[1/3] Plotting training reward curve ...")
 if os.path.isfile(EVAL_NPZ):
     data      = np.load(EVAL_NPZ)
     timesteps = data["timesteps"]
-    mean_rew  = data["results"].mean(axis=1)
-    std_rew   = data["results"].std(axis=1)
+    results   = data["results"]
+    mean_rew  = results.mean(axis=1)
+    std_rew   = results.std(axis=1)
+    best_idx  = int(np.argmax(mean_rew))
+    best_ts   = timesteps[best_idx]
+    best_val  = mean_rew[best_idx]
 
-    # Summary text block below the 2×2 grid
-    summary_lines = []
-    for tag, label, _ in dashboard_tags:
-        s, v = load_tb_scalar(NEW_TB, tag)
-        if s is not None:
-            summary_lines.append(f"{label.split('(')[0].strip()}: final={smooth(v)[-1]:.4f}")
-    if summary_lines:
-        fig.text(0.5, -0.01, "  |  ".join(summary_lines),
-                 ha="center", va="top", fontsize=9, color="#444", style="italic",
-                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#f0f4f8", alpha=0.8))
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(timesteps, smooth(mean_rew), color=COLORS["best"],
+            linewidth=2, label="Smoothed mean reward", zorder=3)
+    ax.fill_between(timesteps, mean_rew - std_rew, mean_rew + std_rew,
+                    color=COLORS["best"], alpha=0.15, label="+-1 std")
+    ax.plot(timesteps, mean_rew, color=COLORS["best"], alpha=0.2, linewidth=0.6)
+
+    # Best checkpoint marker
+    ax.axvline(best_ts, color=COLORS["green"], linestyle="--", linewidth=1.5,
+               label=f"Best model @ step {best_ts:,}")
+    ax.scatter([best_ts], [best_val], color=COLORS["green"], s=80, zorder=5)
+    ax.annotate(f"Best: {best_val:.0f}\n@ step {best_ts:,}",
+                xy=(best_ts, best_val), xytext=(15, 15),
+                textcoords="offset points", fontsize=9, fontweight="bold",
+                color=COLORS["green"],
+                arrowprops=dict(arrowstyle="->", color=COLORS["green"]))
+
+    # Final model marker
+    final_val = mean_rew[-1]
+    final_ts  = timesteps[-1]
+    ax.scatter([final_ts], [final_val], color=COLORS["final"], s=80, zorder=5, marker="D")
+    ax.annotate(f"Final: {final_val:.0f}\n@ step {final_ts:,}",
+                xy=(final_ts, final_val), xytext=(15, -25),
+                textcoords="offset points", fontsize=9, fontweight="bold",
+                color=COLORS["final"],
+                arrowprops=dict(arrowstyle="->", color=COLORS["final"]))
+
+    ax.set_title("PPO Training Curve - Evaluation Reward Over Time",
+                 fontsize=14, fontweight="bold")
+    ax.set_xlabel("Training Steps", fontsize=11)
+    ax.set_ylabel("Mean Episode Reward", fontsize=11)
+    ax.legend(fontsize=10, loc="lower right")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = os.path.join(OUT_DIR, "01_training_curve.png")
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"  Saved: {out}")
 else:
-    summary_lines = []
-    for tag, label, _ in dashboard_tags:
-        s, v = load_tb_scalar(NEW_TB, tag)
-        if s is not None:
-            summary_lines.append(f"{label.split('(')[0].strip()}: final={smooth(v)[-1]:.4f}")
-    if summary_lines:
-        fig.text(0.5, -0.01, "  |  ".join(summary_lines),
-                 ha="center", va="top", fontsize=9, color="#444", style="italic",
-                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#f0f4f8", alpha=0.8))
+    print("  [SKIP] evaluations.npz not found")
+    best_ts = None
+    best_val = None
 
-plt.tight_layout()
-out = os.path.join(OUT_DIR, "00_dashboard.png")
-plt.savefig(out, dpi=160, bbox_inches="tight")
-plt.close()
-print(f"  Saved: {out}")
 
-print(f"\nDone! All plots saved to:  {OUT_DIR}")
+# ═════════════════════════════════════════════════════════════════════════════
+# PART 2: Head-to-head SUMO simulation
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n[2/3] Running head-to-head comparison in SUMO ...")
+
+# Check SUMO
+if "SUMO_HOME" not in os.environ:
+    print("  [SKIP] SUMO_HOME not set — cannot run simulation comparison.")
+    sim_results = None
+else:
+    tools = os.path.join(os.environ["SUMO_HOME"], "tools")
+    sys.path.append(tools)
+    import traci
+
+    from stable_baselines3 import PPO as PPOLoader
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from stable_baselines3.common.monitor import Monitor
+
+    # Import env from training script
+    sys.path.insert(0, BASE_DIR)
+    from train_maxpressure_rl import SumoEnv
+
+    def evaluate_model(model_path, label, n_episodes=5):
+        """Run a model for n_episodes, collect per-step metrics."""
+        print(f"    Evaluating: {label} ({os.path.basename(model_path)})")
+        model = PPOLoader.load(model_path)
+
+        all_rewards = []
+        all_queues  = []
+        all_waits   = []
+
+        for ep in range(n_episodes):
+            port = random.randint(10000, 19999)
+            env = SumoEnv(gui=False, max_steps=3600, port=port)
+            obs, _ = env.reset()
+
+            ep_reward = 0
+            ep_queues = []
+            ep_waits  = []
+            done = False
+            step = 0
+
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                ep_reward += reward
+
+                # Collect queue lengths from observation (indices 0-3)
+                ep_queues.append(obs[0:4].mean())
+                # Collect density from observation (indices 4-7)
+                ep_waits.append(obs[4:8].mean())
+                step += 1
+
+            all_rewards.append(ep_reward)
+            all_queues.append(np.mean(ep_queues))
+            all_waits.append(np.mean(ep_waits))
+            env.close()
+            print(f"      Episode {ep+1}/{n_episodes}: reward={ep_reward:.0f}, "
+                  f"avg_queue={np.mean(ep_queues):.2f}, avg_density={np.mean(ep_waits):.3f}")
+
+        return {
+            "label": label,
+            "rewards": all_rewards,
+            "avg_queues": all_queues,
+            "avg_densities": all_waits,
+            "mean_reward": np.mean(all_rewards),
+            "mean_queue": np.mean(all_queues),
+            "mean_density": np.mean(all_waits),
+        }
+
+    sim_results = {}
+    if os.path.isfile(BEST_MODEL):
+        sim_results["best"] = evaluate_model(BEST_MODEL, "Best Model (EvalCallback)")
+    else:
+        print(f"  [SKIP] Best model not found: {BEST_MODEL}")
+
+    if os.path.isfile(FINAL_MODEL):
+        sim_results["final"] = evaluate_model(FINAL_MODEL, "Final Model (1M steps)")
+    else:
+        print(f"  [SKIP] Final model not found: {FINAL_MODEL}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART 3: Comparison plots
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n[3/3] Generating comparison charts ...")
+
+if sim_results and len(sim_results) == 2:
+    best_r  = sim_results["best"]
+    final_r = sim_results["final"]
+
+    # ── 3a. Bar chart comparison ──
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    metrics = [
+        ("mean_reward",  "Mean Episode Reward",  "higher is better"),
+        ("mean_queue",   "Mean Queue Length",     "lower is better"),
+        ("mean_density", "Mean Density",          "lower is better"),
+    ]
+
+    for ax, (key, title, hint) in zip(axes, metrics):
+        vals = [best_r[key], final_r[key]]
+        bars = ax.bar(["Best\n(step 51k)", "Final\n(step 1M)"],
+                      vals, color=[COLORS["best"], COLORS["final"]],
+                      width=0.5, edgecolor="white", linewidth=1.5)
+
+        # Value labels on bars
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                    f"{v:.1f}", ha="center", va="bottom", fontweight="bold", fontsize=11)
+
+        # Winner highlight
+        if key == "mean_reward":
+            winner = 0 if vals[0] > vals[1] else 1
+        else:
+            winner = 0 if vals[0] < vals[1] else 1
+        bars[winner].set_edgecolor(COLORS["green"])
+        bars[winner].set_linewidth(3)
+
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.text(0.98, 0.02, hint, transform=ax.transAxes,
+                fontsize=8, color="grey", ha="right", va="bottom")
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Head-to-Head: Best Model vs Final Model",
+                 fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    out = os.path.join(OUT_DIR, "02_bar_comparison.png")
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"  Saved: {out}")
+
+    # ── 3b. Episode-by-episode reward comparison ──
+    fig, ax = plt.subplots(figsize=(10, 5))
+    eps = range(1, len(best_r["rewards"]) + 1)
+    ax.plot(eps, best_r["rewards"],  "o-", color=COLORS["best"],
+            linewidth=2, markersize=8, label=f"Best (mean={best_r['mean_reward']:.0f})")
+    ax.plot(eps, final_r["rewards"], "D-", color=COLORS["final"],
+            linewidth=2, markersize=8, label=f"Final (mean={final_r['mean_reward']:.0f})")
+    ax.axhline(best_r["mean_reward"],  color=COLORS["best"],  linestyle="--", alpha=0.5)
+    ax.axhline(final_r["mean_reward"], color=COLORS["final"], linestyle="--", alpha=0.5)
+    ax.set_title("Episode Rewards: Best vs Final Model", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Episode", fontsize=11)
+    ax.set_ylabel("Total Episode Reward", fontsize=11)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = os.path.join(OUT_DIR, "03_episode_rewards.png")
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"  Saved: {out}")
+
+    # ── 3c. Combined dashboard ──
+    fig = plt.figure(figsize=(16, 10))
+    fig.suptitle("PPO Traffic Model Comparison Dashboard",
+                 fontsize=16, fontweight="bold")
+    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.3)
+
+    # Panel 1: Training curve
+    if os.path.isfile(EVAL_NPZ):
+        ax1 = fig.add_subplot(gs[0, :])
+        data = np.load(EVAL_NPZ)
+        ts = data["timesteps"]
+        mr = data["results"].mean(axis=1)
+        ax1.plot(ts, smooth(mr), color=COLORS["best"], linewidth=2)
+        ax1.fill_between(ts, mr - data["results"].std(axis=1),
+                         mr + data["results"].std(axis=1),
+                         color=COLORS["best"], alpha=0.1)
+        ax1.axvline(51000, color=COLORS["green"], linestyle="--", linewidth=1.5,
+                    label="Best model checkpoint")
+        ax1.set_title("Training Reward Curve", fontsize=12, fontweight="bold")
+        ax1.set_xlabel("Steps")
+        ax1.set_ylabel("Mean Reward")
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
+    # Panel 2: Bar comparison
+    ax2 = fig.add_subplot(gs[1, 0])
+    vals = [best_r["mean_reward"], final_r["mean_reward"]]
+    bars = ax2.bar(["Best\n(51k)", "Final\n(1M)"], vals,
+                   color=[COLORS["best"], COLORS["final"]], width=0.5)
+    for bar, v in zip(bars, vals):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                 f"{v:.0f}", ha="center", va="bottom", fontweight="bold")
+    ax2.set_title("Mean Reward Comparison", fontsize=12, fontweight="bold")
+    ax2.grid(axis="y", alpha=0.3)
+
+    # Panel 3: Queue comparison
+    ax3 = fig.add_subplot(gs[1, 1])
+    vals_q = [best_r["mean_queue"], final_r["mean_queue"]]
+    bars_q = ax3.bar(["Best\n(51k)", "Final\n(1M)"], vals_q,
+                     color=[COLORS["best"], COLORS["final"]], width=0.5)
+    for bar, v in zip(bars_q, vals_q):
+        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                 f"{v:.2f}", ha="center", va="bottom", fontweight="bold")
+    ax3.set_title("Mean Queue Length Comparison", fontsize=12, fontweight="bold")
+    ax3.grid(axis="y", alpha=0.3)
+
+    # Summary text
+    diff_pct = ((best_r["mean_reward"] - final_r["mean_reward"])
+                / abs(final_r["mean_reward"]) * 100)
+    summary = (f"Best model outperforms Final by {abs(diff_pct):.1f}%  |  "
+               f"Best reward: {best_r['mean_reward']:.0f}  |  "
+               f"Final reward: {final_r['mean_reward']:.0f}")
+    fig.text(0.5, 0.01, summary, ha="center", fontsize=11, fontweight="bold",
+             color=COLORS["green"] if diff_pct > 0 else COLORS["final"],
+             bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f4f8", alpha=0.9))
+
+    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+    out = os.path.join(OUT_DIR, "00_dashboard.png")
+    plt.savefig(out, dpi=160, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {out}")
+
+elif sim_results:
+    print("  [SKIP] Need both models for comparison (only found one).")
+else:
+    # No SUMO — still generate the training curve plot if we have eval data
+    print("  [SKIP] No simulation results to plot.")
+
+print(f"\nDone! All plots saved to: {OUT_DIR}")
 print("Files generated:")
 for f in sorted(os.listdir(OUT_DIR)):
     print(f"  {f}")

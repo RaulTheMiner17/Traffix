@@ -117,17 +117,19 @@ class TrafficLightSystem:
 
     def load_brain(self):
         print("🧠 Attempting to load AI Brain...")
-        if not os.path.exists("vec_normalize.pkl") or not os.path.exists("ppo_traffic_final.zip"):
+        model_path = os.path.join("sumo_test", "logs", "checkpoints", "ppo_traffic_1000000_steps.zip")
+        norm_path = os.path.join("sumo_test", "vec_normalize.pkl")
+        if not os.path.exists(norm_path) or not os.path.exists(model_path):
             print("⚠️  FILES MISSING. Using Logic Fallback.")
             return
 
         try:
             dummy_env = DummyVecEnv([lambda: gym.make("CartPole-v1")]) 
-            dummy_env.observation_space = spaces.Box(low=0, high=np.inf, shape=(15,), dtype=np.float32)
-            self.vec_env = VecNormalize.load("vec_normalize.pkl", dummy_env)
+            dummy_env.observation_space = spaces.Box(low=0, high=np.inf, shape=(17,), dtype=np.float32)
+            self.vec_env = VecNormalize.load(norm_path, dummy_env)
             self.vec_env.training = False
             self.vec_env.norm_reward = False
-            self.rl_model = PPO.load("ppo_traffic_final", env=self.vec_env)
+            self.rl_model = PPO.load(model_path, env=self.vec_env)
             print("✅ Traffic AI: Model LOADED SUCCESSFULLY!")
         except Exception as e:
             print(f"❌ Traffic AI Load Error: {e}")
@@ -143,7 +145,11 @@ class TrafficLightSystem:
                 densities.append(data['density'])
                 speeds.append(data['speed'])
         
-        phase_oh = [1.0, 0.0] if self.current_phase == 0 else [0.0, 1.0]
+        phase_oh = [0.0, 0.0, 0.0, 0.0]
+        if self.current_phase == 0:
+            phase_oh[1 if self.sub_phase == 'left_turn' else 0] = 1.0
+        else:
+            phase_oh[3 if self.sub_phase == 'left_turn' else 2] = 1.0
         time_diff = time.time() - self.last_switch_time
         time_norm = min(time_diff / self.max_green_time, 1.0)
         
@@ -159,8 +165,10 @@ class TrafficLightSystem:
             
             if self.rl_model:
                 try:
-                    action, _ = self.rl_model.predict(obs, deterministic=True)
-                except: pass
+                    rl_action, _ = self.rl_model.predict(obs, deterministic=True)
+                    action = 0 if rl_action in [0, 1] else 1
+                except Exception as e:
+                    print(f"RL Predict Error: {e}")
             else:
                 ns_density = obs[4] + obs[5]
                 ew_density = obs[6] + obs[7]
@@ -339,7 +347,7 @@ class MetricsTracker:
                 'wait_time': list(self._timeline_wait),
             }
             rl_bundle = {
-                'name': 'PPO (ppo_traffic_final)' if traffic_brain.rl_model else 'Max-Pressure Fallback',
+                'name': 'PPO (1M checkpoint)' if traffic_brain.rl_model else 'Max-Pressure Fallback',
                 'active': traffic_brain.rl_model is not None,
                 'type': 'Reinforcement Learning (PPO)' if traffic_brain.rl_model else 'Heuristic',
                 'phase_switches': self.phase_switches.get('rl', 0),
