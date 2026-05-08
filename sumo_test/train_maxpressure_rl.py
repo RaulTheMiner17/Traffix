@@ -263,15 +263,26 @@ def train_best_model():
     # 1. Vectorised training environment
     # ------------------------------------------------------------------
     env = DummyVecEnv([make_env()])
-    # Normalise observations AND rewards (critical for stable PPO training)
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    norm_path = "vec_normalize.pkl"
+    if os.path.exists(norm_path):
+        print(f"Loading existing normalization stats from {norm_path}")
+        env = VecNormalize.load(norm_path, env)
+        env.training = True
+        env.norm_reward = True
+    else:
+        env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
     # ------------------------------------------------------------------
     # 2. Separate evaluation environment (must share norm stats)
     # ------------------------------------------------------------------
     eval_env = DummyVecEnv([make_env()])
-    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False,
-                            clip_obs=10.0, training=False)
+    if os.path.exists(norm_path):
+        eval_env = VecNormalize.load(norm_path, eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+    else:
+        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False,
+                                clip_obs=10.0, training=False)
 
     eval_callback = EvalCallback(
         eval_env,
@@ -296,35 +307,42 @@ def train_best_model():
     # ------------------------------------------------------------------
     policy_kwargs = dict(
         activation_fn=nn.Tanh,
-        # Larger network: 512→512→256 for both actor and critic
         net_arch=dict(pi=[512, 512, 256], vf=[512, 512, 256]),
     )
 
-    model = PPO(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        # Linearly decaying LR from 3e-4 down to 1e-5
-        learning_rate=linear_schedule(3e-4, 1e-5),
-        n_steps=4096,           # larger rollout buffer → more stable gradients
-        batch_size=256,         # larger mini-batches
-        n_epochs=15,            # more optimisation passes per rollout
-        gamma=0.995,            # long planning horizon (traffic needs lookahead)
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.005,         # mild entropy → exploit learned policy
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log="./traffic_tensorboard/",
-    )
+    checkpoint_path = "logs/checkpoints/ppo_traffic_1000000_steps.zip"
+    if os.path.exists(checkpoint_path):
+        print(f"Resuming training from {checkpoint_path}")
+        model = PPO.load(checkpoint_path, env=env, tensorboard_log="./traffic_tensorboard/")
+        # Set a low learning rate for fine-tuning
+        model.learning_rate = linear_schedule(1.5e-5, 1e-6)
+    else:
+        model = PPO(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            learning_rate=linear_schedule(3e-4, 1e-5),
+            n_steps=4096,
+            batch_size=256,
+            n_epochs=15,
+            gamma=0.995,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.005,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs,
+            tensorboard_log="./traffic_tensorboard/",
+        )
 
     print("Starting Optimised Training (1 000 000 steps) …")
     try:
         model.learn(
             total_timesteps=TOTAL_TIMESTEPS,
             callback=[eval_callback, checkpoint_callback],
-            progress_bar=True,
+            tb_log_name="PPO_Phase2",
+            reset_num_timesteps=False,
+            progress_bar=True
         )
     except KeyboardInterrupt:
         print("Training interrupted – saving current model.")
