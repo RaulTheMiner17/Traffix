@@ -310,7 +310,7 @@ def train_best_model():
         net_arch=dict(pi=[512, 512, 256], vf=[512, 512, 256]),
     )
 
-    checkpoint_path = "logs/checkpoints/ppo_traffic_1000000_steps.zip"
+    checkpoint_path = "logs/checkpoints/ppo_traffic_2000000_steps.zip"
     if os.path.exists(checkpoint_path):
         print(f"Resuming training from {checkpoint_path}")
         model = PPO.load(checkpoint_path, env=env, tensorboard_log="./traffic_tensorboard/")
@@ -335,7 +335,7 @@ def train_best_model():
             tensorboard_log="./traffic_tensorboard/",
         )
 
-    print("Starting Optimised Training (1 000 000 steps) …")
+    print("Starting Training…")
     try:
         model.learn(
             total_timesteps=TOTAL_TIMESTEPS,
