@@ -26,7 +26,7 @@ import matplotlib.gridspec as gridspec
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_1000000_steps.zip")
+FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_2000000_steps.zip")
 BEST_MODEL  = os.path.join(BASE_DIR, "logs", "best_model", "best_model.zip")
 EVAL_NPZ    = os.path.join(BASE_DIR, "logs", "evaluations.npz")
 VEC_NORM    = os.path.join(BASE_DIR, "vec_normalize.pkl")
@@ -47,11 +47,21 @@ def smooth(values, weight=0.85):
         smoothed.append(last)
     return np.array(smoothed)
 
+def fmt_ts(ts):
+    if ts is None: return "??"
+    if ts >= 1000000: return f"{ts/1000000:.1f}M".replace(".0M", "M")
+    if ts >= 1000: return f"{ts/1000:.0f}k"
+    return str(ts)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PART 1: Training curve from evaluations.npz
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n[1/3] Plotting training reward curve ...")
+best_ts = None
+final_ts = None
+best_val = None
+
 if os.path.isfile(EVAL_NPZ):
     data      = np.load(EVAL_NPZ)
     timesteps = data["timesteps"]
@@ -60,6 +70,7 @@ if os.path.isfile(EVAL_NPZ):
     std_rew   = results.std(axis=1)
     best_idx  = int(np.argmax(mean_rew))
     best_ts   = timesteps[best_idx]
+    final_ts  = timesteps[-1]
     best_val  = mean_rew[best_idx]
 
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -71,9 +82,9 @@ if os.path.isfile(EVAL_NPZ):
 
     # Best checkpoint marker
     ax.axvline(best_ts, color=COLORS["green"], linestyle="--", linewidth=1.5,
-               label=f"Best model @ step {best_ts:,}")
+               label=f"Optimal Stop Point @ step {best_ts:,}")
     ax.scatter([best_ts], [best_val], color=COLORS["green"], s=80, zorder=5)
-    ax.annotate(f"Best: {best_val:.0f}\n@ step {best_ts:,}",
+    ax.annotate(f"Optimal Stop:\n{best_val:.0f} @ step {best_ts:,}",
                 xy=(best_ts, best_val), xytext=(15, 15),
                 textcoords="offset points", fontsize=9, fontweight="bold",
                 color=COLORS["green"],
@@ -102,8 +113,6 @@ if os.path.isfile(EVAL_NPZ):
     print(f"  Saved: {out}")
 else:
     print("  [SKIP] evaluations.npz not found")
-    best_ts = None
-    best_val = None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -139,8 +148,17 @@ else:
 
         for ep in range(n_episodes):
             port = random.randint(10000, 19999)
-            env = SumoEnv(gui=False, max_steps=3600, port=port)
-            obs, _ = env.reset()
+            inner_env = SumoEnv(gui=False, max_steps=3600, port=port)
+            env = DummyVecEnv([lambda: Monitor(inner_env)])
+            
+            if os.path.exists(VEC_NORM):
+                env = VecNormalize.load(VEC_NORM, env)
+                env.training = False
+                env.norm_reward = False
+            else:
+                print("      [WARNING] vec_normalize.pkl not found. Results will be inaccurate.")
+
+            obs = env.reset()
 
             ep_reward = 0
             ep_queues = []
@@ -150,14 +168,17 @@ else:
 
             while not done:
                 action, _ = model.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                ep_reward += reward
+                obs, reward, done_arr, info = env.step(action)
+                done = done_arr[0]
+                ep_reward += float(reward[0])
+
+                # Get unnormalized observation directly from the inner environment
+                raw_obs = inner_env._get_obs()
 
                 # Collect queue lengths from observation (indices 0-3)
-                ep_queues.append(obs[0:4].mean())
+                ep_queues.append(raw_obs[0:4].mean())
                 # Collect density from observation (indices 4-7)
-                ep_waits.append(obs[4:8].mean())
+                ep_waits.append(raw_obs[4:8].mean())
                 step += 1
 
             all_rewards.append(ep_reward)
@@ -209,9 +230,10 @@ if sim_results and len(sim_results) == 2:
 
     for ax, (key, title, hint) in zip(axes, metrics):
         vals = [best_r[key], final_r[key]]
-        bars = ax.bar(["Best\n(step 51k)", "Final\n(step 1M)"],
+        bars = ax.bar([f"Best\n(step {fmt_ts(best_ts)})", f"Final\n(step {fmt_ts(final_ts)})"],
                       vals, color=[COLORS["best"], COLORS["final"]],
                       width=0.5, edgecolor="white", linewidth=1.5)
+
 
         # Value labels on bars
         for bar, v in zip(bars, vals):
@@ -275,9 +297,11 @@ if sim_results and len(sim_results) == 2:
         ax1.fill_between(ts, mr - data["results"].std(axis=1),
                          mr + data["results"].std(axis=1),
                          color=COLORS["best"], alpha=0.1)
-        ax1.axvline(51000, color=COLORS["green"], linestyle="--", linewidth=1.5,
-                    label="Best model checkpoint")
+        if best_ts is not None:
+            ax1.axvline(best_ts, color=COLORS["green"], linestyle="--", linewidth=1.5,
+                        label=f"Optimal Stop Point ({fmt_ts(best_ts)})")
         ax1.set_title("Training Reward Curve", fontsize=12, fontweight="bold")
+
         ax1.set_xlabel("Steps")
         ax1.set_ylabel("Mean Reward")
         ax1.legend(fontsize=9)
@@ -286,7 +310,7 @@ if sim_results and len(sim_results) == 2:
     # Panel 2: Bar comparison
     ax2 = fig.add_subplot(gs[1, 0])
     vals = [best_r["mean_reward"], final_r["mean_reward"]]
-    bars = ax2.bar(["Best\n(51k)", "Final\n(1M)"], vals,
+    bars = ax2.bar([f"Best\n({fmt_ts(best_ts)})", f"Final\n({fmt_ts(final_ts)})"], vals,
                    color=[COLORS["best"], COLORS["final"]], width=0.5)
     for bar, v in zip(bars, vals):
         ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
@@ -297,7 +321,7 @@ if sim_results and len(sim_results) == 2:
     # Panel 3: Queue comparison
     ax3 = fig.add_subplot(gs[1, 1])
     vals_q = [best_r["mean_queue"], final_r["mean_queue"]]
-    bars_q = ax3.bar(["Best\n(51k)", "Final\n(1M)"], vals_q,
+    bars_q = ax3.bar([f"Best\n({fmt_ts(best_ts)})", f"Final\n({fmt_ts(final_ts)})"], vals_q,
                      color=[COLORS["best"], COLORS["final"]], width=0.5)
     for bar, v in zip(bars_q, vals_q):
         ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height(),

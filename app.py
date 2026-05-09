@@ -117,7 +117,7 @@ class TrafficLightSystem:
 
     def load_brain(self):
         print("🧠 Attempting to load AI Brain...")
-        model_path = os.path.join("sumo_test", "logs", "checkpoints", "ppo_traffic_1000000_steps.zip")
+        model_path = os.path.join("sumo_test", "logs", "checkpoints", "ppo_traffic_2000000_steps.zip")
         norm_path = os.path.join("sumo_test", "vec_normalize.pkl")
         if not os.path.exists(norm_path) or not os.path.exists(model_path):
             print("⚠️  FILES MISSING. Using Logic Fallback.")
