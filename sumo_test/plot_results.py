@@ -26,7 +26,7 @@ import matplotlib.gridspec as gridspec
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_2000000_steps.zip")
+FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_3000000_steps.zip")
 BEST_MODEL  = os.path.join(BASE_DIR, "logs", "best_model", "best_model.zip")
 EVAL_NPZ    = os.path.join(BASE_DIR, "logs", "evaluations.npz")
 VEC_NORM    = os.path.join(BASE_DIR, "vec_normalize.pkl")
@@ -205,7 +205,7 @@ else:
         print(f"  [SKIP] Best model not found: {BEST_MODEL}")
 
     if os.path.isfile(FINAL_MODEL):
-        sim_results["final"] = evaluate_model(FINAL_MODEL, "Final Model (1M steps)")
+        sim_results["final"] = evaluate_model(FINAL_MODEL, f"Final Model ({fmt_ts(final_ts)} steps)")
     else:
         print(f"  [SKIP] Final model not found: {FINAL_MODEL}")
 
