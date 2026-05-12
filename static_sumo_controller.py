@@ -126,9 +126,9 @@ class StaticSUMOController:
                     self.vehicle_count_history.append(total_v)
 
                 # ==========================================
-                # SIGNAL LOGIC (60s GREEN / 120s RED TIMING)
+                # SIGNAL LOGIC (FIXED 30s CYCLIC TIMING)
                 # ==========================================
-                target_green_time = 60 if self.current_phase == 0 else 120
+                target_green_time = 30
 
                 if self.time_since_switch >= target_green_time and not is_yellow:
                     is_yellow = True

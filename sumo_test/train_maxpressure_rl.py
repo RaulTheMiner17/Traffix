@@ -126,6 +126,7 @@ class SumoEnv(gym.Env):
         must_switch = self.time_since_last_switch >= self.max_green_time
 
         switch = False
+        switch_penalty = 0.0
         if must_switch and action == self.current_phase:
             # Forced rotation to prevent starvation
             switch = True
@@ -138,6 +139,7 @@ class SumoEnv(gym.Env):
             self.current_phase = action
             traci.trafficlight.setPhase(self.tls, ACTION_TO_SUMO_GREEN[self.current_phase])
             self.time_since_last_switch = 0
+            switch_penalty = 0.25
 
         # Run simulation steps and accumulate reward
         reward = 0.0
@@ -146,6 +148,8 @@ class SumoEnv(gym.Env):
             self.t += 1
             self.time_since_last_switch += 1
             reward -= self._calculate_pressure_reward()
+
+        reward -= switch_penalty
 
         obs = self._get_obs()
         terminated = self.t >= self.max_steps
@@ -200,19 +204,23 @@ class SumoEnv(gym.Env):
 
     def _calculate_pressure_reward(self):
         """
-        Multi-objective penalty that captures:
-          1. Queue length per approach
-          2. Total accumulated waiting time (normalised)
-          3. Left-turn starvation bonus: extra penalty when left-turners
-             have been waiting a long time without a protected phase.
+        Multi-objective penalty aligned with the dashboard metrics:
+          1. Average queue length per approach
+          2. Average waiting time per approach
+          3. Density pressure
+          4. Left-turn starvation protection
         """
         total_queue = 0
         total_wait = 0
+        total_density = 0.0
         max_veh_wait = 0.0
 
         for lane in self.lanes:
             total_queue += traci.lane.getLastStepHaltingNumber(lane)
             total_wait += traci.lane.getWaitingTime(lane)
+            veh_count = traci.lane.getLastStepVehicleNumber(lane)
+            lane_len = traci.lane.getLength(lane)
+            total_density += veh_count / max(lane_len / 5.0, 1.0)
 
         # Worst single-vehicle wait (detects left-turn starvation)
         for veh_id in traci.vehicle.getIDList():
@@ -220,12 +228,19 @@ class SumoEnv(gym.Env):
             if w > max_veh_wait:
                 max_veh_wait = w
 
-        # Weighted combination
-        alpha = 0.5   # weight for total accumulated wait
-        beta  = 0.02  # weight for max single-vehicle wait (starvation)
-        penalty = (total_queue
-                   + alpha * (total_wait / 60.0)
-                   + beta  * (max_veh_wait / 60.0))
+        avg_queue = total_queue / len(self.lanes)
+        avg_wait = total_wait / len(self.lanes)
+        avg_density = total_density / len(self.lanes)
+
+        # Weighted combination.
+        # Smaller values are better, so the PPO policy is trained to reduce
+        # the same traffic indicators the dashboard displays.
+        penalty = (
+            0.70 * avg_queue
+            + 0.20 * (avg_wait / 60.0)
+            + 0.10 * avg_density
+            + 0.02 * (max_veh_wait / 60.0)
+        )
         return penalty
 
     def close(self):
@@ -314,8 +329,11 @@ def train_best_model():
     if os.path.exists(checkpoint_path):
         print(f"Resuming training from {checkpoint_path}")
         model = PPO.load(checkpoint_path, env=env, tensorboard_log="./traffic_tensorboard/")
-        # Set a low learning rate for fine-tuning
-        model.learning_rate = linear_schedule(1.5e-5, 1e-6)
+        # Keep some learning signal so the policy can move past the plateau.
+        fine_tune_lr = linear_schedule(5e-5, 5e-6)
+        model.learning_rate = fine_tune_lr
+        if hasattr(model, "lr_schedule"):
+            model.lr_schedule = fine_tune_lr
     else:
         model = PPO(
             "MlpPolicy",

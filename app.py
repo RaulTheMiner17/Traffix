@@ -160,60 +160,70 @@ class TrafficLightSystem:
         while True:
             time.sleep(0.01) 
             obs = self.get_observation_vector()
-            elapsed = time.time() - self.last_switch_time
-            action = self.current_phase 
             
+            # Map current state to action space (0-3)
+            if self.current_phase == 0:
+                current_action = 1 if self.sub_phase == 'left_turn' else 0
+            else:
+                current_action = 3 if self.sub_phase == 'left_turn' else 2
+                
             if self.rl_model:
                 try:
                     rl_action, _ = self.rl_model.predict(obs, deterministic=True)
-                    action = 0 if rl_action in [0, 1] else 1
+                    target_action = int(rl_action)
                 except Exception as e:
                     print(f"RL Predict Error: {e}")
+                    target_action = current_action
             else:
                 ns_density = obs[4] + obs[5]
                 ew_density = obs[6] + obs[7]
-                if self.current_phase == 0 and ew_density > ns_density: action = 1
-                elif self.current_phase == 1 and ns_density > ew_density: action = 0
+                if self.current_phase == 0 and ew_density > ns_density + 0.2: 
+                    target_action = 2 # Switch to EW straight
+                elif self.current_phase == 1 and ns_density > ew_density + 0.2: 
+                    target_action = 0 # Switch to NS straight
+                else:
+                    target_action = current_action
 
-            # Only enforce min_green_time check logic inside the straight phase now
-
-            sub_elapsed = time.time() - self.state_start_time
+            total_green = time.time() - self.last_switch_time
 
             if not self.is_yellow:
-                if self.sub_phase == 'left_turn' and sub_elapsed >= self.left_turn_duration:
-                    self.sub_phase = 'straight'
-                    self.state_start_time = time.time()
-                    print(f"🚦 STRAIGHT phase (AI controlled)")
+                hit_max_green = (total_green >= self.max_green_time)
+                met_min_green = (total_green >= self.min_green_time)
                 
-                elif self.sub_phase == 'straight':
-                    time_in_straight = sub_elapsed
-                    total_green = time.time() - self.last_switch_time
-                    
-                    rl_wants_switch = (action != self.current_phase)
-                    met_min_green = (total_green >= self.min_green_time)
-                    hit_max_green = (total_green >= (self.max_green_time - self.right_turn_duration))
-                    min_straight_met = (time_in_straight >= 5)
-
-                    if (rl_wants_switch and met_min_green and min_straight_met) or hit_max_green:
-                        self.sub_phase = 'right_turn'
-                        self.state_start_time = time.time()
-                        trigger_reason = 'Max Time limit' if hit_max_green else 'AI Traffic Optimization'
-                        print(f"🚦 RIGHT TURN phase (Triggered by {trigger_reason})")
+                wants_switch = (target_action != current_action)
+                
+                if (wants_switch and met_min_green) or hit_max_green:
+                    if hit_max_green and target_action == current_action:
+                        target_action = (current_action + 1) % 4
+                        trigger_reason = 'Max Time limit'
+                    else:
+                        trigger_reason = 'AI Traffic Optimization'
                         
-                elif self.sub_phase == 'right_turn' and sub_elapsed >= self.right_turn_duration:
-                    print(f"🚦 YELLOW: Preparing to switch")
+                    print(f"🚦 YELLOW: Preparing to switch to phase {target_action} (Triggered by {trigger_reason})")
                     self.is_yellow = True
                     self.yellow_start_time = time.time()
-                    self.state_start_time = time.time()
+                    self.target_action = target_action
             
             if self.is_yellow and (time.time() - self.yellow_start_time) >= self.yellow_duration:
-                new_phase = 1 if self.current_phase == 0 else 0
-                print(f"🚦 SWITCHING: {'EW Green' if new_phase==1 else 'NS Green'}")
-                self.current_phase = new_phase
+                new_action = self.target_action
+                if new_action == 0:
+                    self.current_phase = 0
+                    self.sub_phase = 'straight'
+                elif new_action == 1:
+                    self.current_phase = 0
+                    self.sub_phase = 'left_turn'
+                elif new_action == 2:
+                    self.current_phase = 1
+                    self.sub_phase = 'straight'
+                elif new_action == 3:
+                    self.current_phase = 1
+                    self.sub_phase = 'left_turn'
+                    
+                print(f"🚦 SWITCHING: Phase {new_action} (Dir: {'EW' if self.current_phase==1 else 'NS'} | {self.sub_phase})")
                 self.last_switch_time = time.time()
-                self.is_yellow = False
-                self.sub_phase = 'left_turn'
                 self.state_start_time = time.time()
+                self.is_yellow = False
+                
                 if hasattr(self, '_metrics_cb') and self._metrics_cb:
                     self._metrics_cb()
 
@@ -238,7 +248,7 @@ class StaticTrafficSystem:
             elapsed = time.time() - self.last_switch_time
             action = self.current_phase
             
-            target_green_time = 60 if self.current_phase == 0 else 120
+            target_green_time = 30
             
             if elapsed >= target_green_time and elapsed >= self.min_green_time:
                 action = 1 - self.current_phase
@@ -347,7 +357,7 @@ class MetricsTracker:
                 'wait_time': list(self._timeline_wait),
             }
             rl_bundle = {
-                'name': 'PPO (1M checkpoint)' if traffic_brain.rl_model else 'Max-Pressure Fallback',
+                'name': 'PPO (Best Model)' if traffic_brain.rl_model else 'Max-Pressure Fallback',
                 'active': traffic_brain.rl_model is not None,
                 'type': 'Reinforcement Learning (PPO)' if traffic_brain.rl_model else 'Heuristic',
                 'phase_switches': self.phase_switches.get('rl', 0),
@@ -636,11 +646,8 @@ def get_signal_status():
         target_time = traffic_brain.yellow_duration
         elapsed = time.time() - traffic_brain.yellow_start_time
     else:
-        elapsed = time.time() - traffic_brain.state_start_time
-        if traffic_brain.sub_phase == 'left_turn': target_time = traffic_brain.left_turn_duration
-        elif traffic_brain.sub_phase == 'straight': 
-            target_time = traffic_brain.max_green_time - traffic_brain.left_turn_duration - traffic_brain.right_turn_duration
-        else: target_time = traffic_brain.right_turn_duration
+        elapsed = time.time() - traffic_brain.last_switch_time
+        target_time = traffic_brain.max_green_time
         
     rl_state_timer = max(0.0, round(target_time - elapsed, 1))
 
