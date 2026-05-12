@@ -35,8 +35,10 @@ class StaticSUMOController:
         self.is_yellow = False
         self.yellow_start_time = 0
         self.state_start_time = time.time()
+        self.min_green_time = 30
+        self.max_green_time = 60
         self.yellow_duration = 3
-        self.straight_duration = 30
+        self.straight_duration = 60
         self.left_turn_duration = 0
         self.right_turn_duration = 0
         self.time_since_switch = 0
@@ -92,7 +94,7 @@ class StaticSUMOController:
             is_yellow = False
             yellow_start = 0
             
-            while self.is_running and sim_step < self.max_steps:
+            while self.is_running and (self.max_steps is None or sim_step < self.max_steps):
                 self.conn.simulationStep()
                 
                 time.sleep(loop_sleep_s)
@@ -146,9 +148,9 @@ class StaticSUMOController:
                     self.vehicle_count_history.append(total_v)
 
                 # ==========================================
-                # SIGNAL LOGIC (FIXED 30s CYCLIC TIMING)
+                # SIGNAL LOGIC (FIXED 60s CYCLIC TIMING)
                 # ==========================================
-                target_green_time = max(1, int(30 / loop_sleep_s))
+                target_green_time = max(1, int(self.max_green_time / loop_sleep_s))
 
                 if self.time_since_switch >= target_green_time and not is_yellow:
                     is_yellow = True

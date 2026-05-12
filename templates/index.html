@@ -49,7 +49,7 @@
             <!-- Model Info Bar -->
             <div class="metrics-section">
                 <h3 class="section-title">Controller Status (RL / Static)</h3>
-                <div class="dashboard-stats" style="grid-template-columns: repeat(4, 1fr);">
+                <div class="dashboard-stats dashboard-stats-compact">
                     <div class="stat-card" id="model-card">
                         <div class="stat-label">Controller(s)</div>
                         <div class="stat-value text-[#1DB954]" id="m-model-name" style="font-size:1rem;">---</div>
@@ -116,7 +116,7 @@
             <!-- Per-Direction Breakdown -->
             <div class="metrics-section">
                 <h3 class="section-title">Per-Direction Detections</h3>
-                <div class="dashboard-stats" style="grid-template-columns: repeat(4, 1fr);">
+                <div class="dashboard-stats dashboard-stats-compact">
                     <div class="stat-card"><div class="stat-label">North</div><div class="stat-value text-[#1DB954]" id="m-dir-N">0</div></div>
                     <div class="stat-card"><div class="stat-label">South</div><div class="stat-value text-[#1DB954]" id="m-dir-S">0</div></div>
                     <div class="stat-card"><div class="stat-label">East</div><div class="stat-value text-[#1DB954]" id="m-dir-E">0</div></div>
@@ -151,12 +151,12 @@
                 <div class="info-card">
                     <h4 class="info-title">RL Decision Pipeline</h4>
                     <ul class="info-list">
-                        <li><strong>Observation:</strong> 15-dim vector (4× queue, density, speed + phase + time)</li>
+                        <li><strong>Observation:</strong> 17-dim vector (4x queue, density, speed + phase + time)</li>
                         <li><strong>Model:</strong> PPO with VecNormalize (or max-pressure fallback)</li>
                         <li><strong>Actions:</strong> 0/1 = NS straight/left, 2/3 = EW straight/left</li>
                         <li><strong>Live Guard:</strong> Max-pressure and emergency vehicle priority override unsafe PPO choices</li>
-                        <li><strong>Sub-phases:</strong> Left Turn (5s) → Straight (8s) → Right Turn (4s) → Yellow (3s)</li>
-                        <li class="mt-2"><em>Static baseline uses a simple fixed 30‑second cycle for comparison.</em></li>
+                        <li><strong>Emergency Guard:</strong> ambulance detections preempt to the matching straight green and hold briefly</li>
+                        <li class="mt-2"><em>Static baseline uses 30s minimum green and 60s maximum green for comparison.</em></li>
                     </ul>
                 </div>
             </div>

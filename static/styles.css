@@ -221,6 +221,10 @@ body {
     margin-bottom: 2rem;
 }
 
+.dashboard-stats-compact {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
 .stat-card {
     background: #181818;
     border: none;
@@ -296,6 +300,9 @@ body {
         grid-template-columns: 1fr;
     }
     .dashboard-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .dashboard-stats-compact {
         grid-template-columns: repeat(2, 1fr);
     }
 }

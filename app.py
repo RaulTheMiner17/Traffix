@@ -55,11 +55,16 @@ else:
 
 EMERGENCY_MODEL_PATH = os.environ.get(
     "EMERGENCY_YOLO_WEIGHTS",
-    os.path.join(BASE_DIR, "train_emergency", "runs", "emergency_yolo11s", "weights", "best.pt")
+    os.path.join(BASE_DIR, "train_emergency", "runs", "emergency_yolo11n_ambulance_v2", "weights", "best.pt")
 )
 COCO_YOLO_WEIGHTS = "yolo11s.pt"
 COCO_VEHICLE_CLASS_IDS = [2, 3, 5, 7]
 AMBULANCE_CLASS_ID = 80
+VEHICLE_DETECTION_CONF = float(os.environ.get("VEHICLE_DETECTION_CONF", "0.25"))
+AMBULANCE_DETECTION_CONF = float(os.environ.get("AMBULANCE_DETECTION_CONF", "0.40"))
+AMBULANCE_VEHICLE_IOU = float(os.environ.get("AMBULANCE_VEHICLE_IOU", "0.20"))
+AMBULANCE_VEHICLE_OVERLAP = float(os.environ.get("AMBULANCE_VEHICLE_OVERLAP", "0.35"))
+AMBULANCE_LABEL_MEMORY_FRAMES = int(os.environ.get("AMBULANCE_LABEL_MEMORY_FRAMES", "12"))
 
 vehicle_model = YOLO(COCO_YOLO_WEIGHTS).to(device)
 emergency_model = YOLO(EMERGENCY_MODEL_PATH).to(device) if os.path.exists(EMERGENCY_MODEL_PATH) else None
@@ -103,12 +108,29 @@ def box_iou(a, b):
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     return inter / max(area_a + area_b - inter, 1e-6)
 
+def box_overlap_ratio(inner, outer):
+    ax1, ay1, ax2, ay2 = inner
+    bx1, by1, bx2, by2 = outer
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inner_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    return (iw * ih) / max(inner_area, 1e-6)
+
+def matches_vehicle_detection(ambulance_box, vehicle_boxes):
+    return any(
+        box_iou(ambulance_box, vehicle_box) >= AMBULANCE_VEHICLE_IOU
+        or box_overlap_ratio(ambulance_box, vehicle_box) >= AMBULANCE_VEHICLE_OVERLAP
+        for vehicle_box in vehicle_boxes
+    )
+
 def detect_traffic_objects(frame):
     detections = []
+    vehicle_boxes = []
     vehicle_results = vehicle_model.predict(
         frame,
         classes=COCO_VEHICLE_CLASS_IDS,
-        conf=0.25,
+        conf=VEHICLE_DETECTION_CONF,
         verbose=False,
         device=device,
     )
@@ -117,6 +139,7 @@ def detect_traffic_objects(frame):
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             cls = int(box.cls[0].item())
             detections.append((x1, y1, x2, y2, cls))
+            vehicle_boxes.append((x1, y1, x2, y2))
 
     if not emergency_model or not AMBULANCE_CLASS_IDS:
         return detections
@@ -125,14 +148,15 @@ def detect_traffic_objects(frame):
     ambulance_results = emergency_model.predict(
         frame,
         classes=AMBULANCE_CLASS_IDS,
-        conf=0.25,
+        conf=AMBULANCE_DETECTION_CONF,
         verbose=False,
         device=device,
     )
     if ambulance_results:
         for box in ambulance_results[0].boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            ambulance_detections.append((x1, y1, x2, y2, AMBULANCE_CLASS_ID))
+            if matches_vehicle_detection((x1, y1, x2, y2), vehicle_boxes):
+                ambulance_detections.append((x1, y1, x2, y2, AMBULANCE_CLASS_ID))
 
     if ambulance_detections:
         detections = [
@@ -195,6 +219,10 @@ class TrafficLightSystem:
         self.state_start_time = time.time()  
         self.min_green_time = 7
         self.max_green_time = 35
+        self.emergency_preempt_after = 1.0
+        self.emergency_green_hold = 12.0
+        self.emergency_hold_until = 0.0
+        self.emergency_hold_action = None
         self.yellow_duration = 3
         self.left_turn_duration = 12
         self.straight_duration = 20
@@ -294,8 +322,18 @@ class TrafficLightSystem:
 
         emergency_action = self._emergency_axis_preference()
         current_axis = 0 if current_action in (0, 1) else 2
-        if emergency_action is not None and emergency_action != current_axis and green_time >= self.min_green_time:
-            return emergency_action, "Emergency vehicle priority"
+        now = time.time()
+        if emergency_action is not None:
+            self.emergency_hold_action = emergency_action
+            self.emergency_hold_until = now + self.emergency_green_hold
+            if current_action == emergency_action or green_time >= self.emergency_preempt_after:
+                return emergency_action, "Emergency vehicle priority"
+            return current_action, "Emergency priority pending"
+
+        if self.emergency_hold_action is not None and now < self.emergency_hold_until:
+            return self.emergency_hold_action, "Emergency green hold"
+
+        self.emergency_hold_action = None
 
         ns_pressure, ew_pressure = self._pressure_scores(obs)
         total_pressure = max(ns_pressure + ew_pressure, 1.0)
@@ -344,10 +382,11 @@ class TrafficLightSystem:
             if not self.is_yellow:
                 hit_max_green = (total_green >= self.max_green_time)
                 met_min_green = (total_green >= self.min_green_time)
+                is_emergency_priority = decision_source in ("Emergency vehicle priority", "Emergency green hold")
                 
                 wants_switch = (target_action != current_action)
                 
-                if (wants_switch and met_min_green) or hit_max_green:
+                if (wants_switch and (met_min_green or is_emergency_priority)) or (hit_max_green and not is_emergency_priority):
                     if hit_max_green and target_action == current_action:
                         target_action = 2 if current_action in (0, 1) else 0
                         trigger_reason = 'Max Time limit'
@@ -385,15 +424,15 @@ class TrafficLightSystem:
 class StaticTrafficSystem:
     def __init__(self):
         self.current_phase = 0
-        self.sub_phase = 'left_turn'
+        self.sub_phase = 'straight'
         self.last_switch_time = time.time()
         self.state_start_time = time.time()
-        self.min_green_time = 15
+        self.min_green_time = 30
         self.max_green_time = 60
         self.yellow_duration = 4
-        self.left_turn_duration = 12
-        self.straight_duration = 20
-        self.right_turn_duration = 8
+        self.left_turn_duration = 0
+        self.straight_duration = 60
+        self.right_turn_duration = 0
         self.is_yellow = False
         self.yellow_start_time = 0
 
@@ -403,7 +442,7 @@ class StaticTrafficSystem:
             elapsed = time.time() - self.last_switch_time
             action = self.current_phase
             
-            target_green_time = 30
+            target_green_time = self.max_green_time
             
             if elapsed >= target_green_time and elapsed >= self.min_green_time:
                 action = 1 - self.current_phase
@@ -426,7 +465,7 @@ class StaticTrafficSystem:
                 self.current_phase = new_phase
                 self.last_switch_time = time.time()
                 self.is_yellow = False
-                self.sub_phase = 'left_turn'
+                self.sub_phase = 'straight'
                 self.state_start_time = time.time()
                 if hasattr(self, '_metrics_cb') and self._metrics_cb:
                     self._metrics_cb()
@@ -435,9 +474,10 @@ traffic_brain = TrafficLightSystem()
 threading.Thread(target=traffic_brain.decide, daemon=True).start()
 
 try:
-    from static_sumo_controller import StaticSUMOController
-    # UPDATED: Passing the YOLO vehicle_data directly to the Static Controller
-    static_brain = StaticSUMOController(max_steps=1000, vehicle_data=vehicle_data, data_lock=lock)
+    from static_sumo_controller import StaticSUMOController, SUMO_AVAILABLE as STATIC_SUMO_AVAILABLE
+    if not STATIC_SUMO_AVAILABLE:
+        raise RuntimeError("SUMO is not available")
+    static_brain = StaticSUMOController(max_steps=None, vehicle_data=vehicle_data, data_lock=lock)
     threading.Thread(target=static_brain.run, daemon=True).start()
     print("🚦 Static SUMO-simulation baseline started.")
 except Exception as e:
@@ -718,6 +758,20 @@ class SimpleTracker:
         self.objects = {} # id: (rect, cls)
         self.history = {} # id: [(cx, cy), ...]
         self.disappeared = {} # id: count
+        self.ambulance_memory = {} # id: remaining processed frames to keep ambulance label
+
+    def _stable_class(self, obj_id, detected_cls):
+        if detected_cls == AMBULANCE_CLASS_ID:
+            self.ambulance_memory[obj_id] = AMBULANCE_LABEL_MEMORY_FRAMES
+            return AMBULANCE_CLASS_ID
+
+        remaining = self.ambulance_memory.get(obj_id, 0)
+        if remaining > 0:
+            self.ambulance_memory[obj_id] = remaining - 1
+            return AMBULANCE_CLASS_ID
+
+        self.ambulance_memory.pop(obj_id, None)
+        return detected_cls
 
     def update(self, rects_data):
         new_objects = {}
@@ -739,6 +793,7 @@ class SimpleTracker:
                     matched_id = obj_id
             
             if matched_id is not None:
+                cls = self._stable_class(matched_id, cls)
                 new_objects[matched_id] = (rect, cls)
                 active_objects[matched_id] = (rect, cls)
                 self.history[matched_id].append((cx, cy))
@@ -747,6 +802,7 @@ class SimpleTracker:
                 self.disappeared[matched_id] = 0
                 del available_objects[matched_id]
             else:
+                cls = self._stable_class(self.next_id, cls)
                 new_objects[self.next_id] = (rect, cls)
                 active_objects[self.next_id] = (rect, cls)
                 self.history[self.next_id] = [(cx, cy)]
@@ -759,6 +815,7 @@ class SimpleTracker:
                 new_objects[obj_id] = (o_rect, o_cls) 
             else:
                 if obj_id in self.history: del self.history[obj_id]
+                self.ambulance_memory.pop(obj_id, None)
                 del self.disappeared[obj_id]
                 
         self.objects = new_objects

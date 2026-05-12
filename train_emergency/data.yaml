@@ -1,0 +1,14 @@
+path: train_emergency
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names: ['ambulance']
+
+roboflow:
+  workspace: rauls-workspace-joqgr
+  project: ambulance-wmxl5-ju7cz
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/rauls-workspace-joqgr/ambulance-wmxl5-ju7cz/dataset/1

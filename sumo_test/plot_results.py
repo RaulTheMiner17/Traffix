@@ -16,11 +16,18 @@ Output: ./plots/
 import os
 import sys
 import random
+import glob
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+
+try:
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+except ImportError:
+    EventAccumulator = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -29,7 +36,14 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 FINAL_MODEL = os.path.join(BASE_DIR, "logs", "checkpoints", "ppo_traffic_3000000_steps.zip")
 BEST_MODEL  = os.path.join(BASE_DIR, "logs", "best_model", "best_model.zip")
 EVAL_NPZ    = os.path.join(BASE_DIR, "logs", "evaluations.npz")
+EVAL_NPZ_PARTS = [
+    os.path.join(BASE_DIR, "logs", "1m_evaluations.npz"),
+    os.path.join(BASE_DIR, "logs", "2m_evaluations.npz"),
+    os.path.join(BASE_DIR, "logs", "3m_evaluations.npz"),
+    EVAL_NPZ,
+]
 VEC_NORM    = os.path.join(BASE_DIR, "vec_normalize.pkl")
+TB_DIR      = os.path.join(BASE_DIR, "traffic_tensorboard")
 OUT_DIR     = os.path.join(BASE_DIR, "plots")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -47,11 +61,102 @@ def smooth(values, weight=0.85):
         smoothed.append(last)
     return np.array(smoothed)
 
+def rolling_mean(values, window=7):
+    """Centered rolling mean for display-only smoothing."""
+    if len(values) < 2:
+        return np.array(values)
+    window = max(1, min(window, len(values)))
+    if window % 2 == 0:
+        window -= 1
+    pad = window // 2
+    padded = np.pad(values, (pad, pad), mode="edge")
+    kernel = np.ones(window) / window
+    return np.convolve(padded, kernel, mode="valid")
+
 def fmt_ts(ts):
     if ts is None: return "??"
     if ts >= 1000000: return f"{ts/1000000:.1f}M".replace(".0M", "M")
     if ts >= 1000: return f"{ts/1000:.0f}k"
     return str(ts)
+
+def fmt_axis_ts(ts, _pos=None):
+    if ts >= 1000000:
+        return f"{ts / 1000000:.1f}M".replace(".0M", "M")
+    if ts >= 1000:
+        return f"{ts / 1000:.0f}k"
+    return f"{ts:.0f}"
+
+def fmt_axis_reward(reward, _pos=None):
+    sign = "-" if reward < 0 else ""
+    value = abs(reward)
+    if value >= 1000:
+        return f"{sign}{value / 1000:.0f}k"
+    return f"{reward:.0f}"
+
+def reward_ylim(mean_rewards):
+    """Use robust y-limits so rare failed episodes do not flatten the curve."""
+    low, high = np.percentile(mean_rewards, [1, 99])
+    pad = (high - low) * 0.08
+    return low - pad, high + pad
+
+def load_eval_history():
+    """Load all available evaluation archives into one sorted timeline."""
+    paths = [p for p in EVAL_NPZ_PARTS if os.path.isfile(p)]
+    if not paths:
+        paths = sorted(glob.glob(os.path.join(BASE_DIR, "logs", "*evaluations.npz")))
+    if not paths:
+        return None
+
+    timesteps = []
+    mean_rewards = []
+    std_rewards = []
+    for path in paths:
+        data = np.load(path)
+        results = data["results"]
+        timesteps.append(data["timesteps"])
+        mean_rewards.append(results.mean(axis=1))
+        std_rewards.append(results.std(axis=1))
+
+    timesteps = np.concatenate(timesteps)
+    mean_rewards = np.concatenate(mean_rewards)
+    std_rewards = np.concatenate(std_rewards)
+
+    order = np.argsort(timesteps)
+    timesteps = timesteps[order]
+    mean_rewards = mean_rewards[order]
+    std_rewards = std_rewards[order]
+
+    _, unique_idx = np.unique(timesteps, return_index=True)
+    unique_idx = np.sort(unique_idx)
+    return timesteps[unique_idx], mean_rewards[unique_idx], std_rewards[unique_idx]
+
+def load_tensorboard_scalar(tag):
+    """Read one scalar tag from all TensorBoard event files."""
+    if EventAccumulator is None or not os.path.isdir(TB_DIR):
+        return None
+
+    points = []
+    event_files = glob.glob(os.path.join(TB_DIR, "**", "events.out.tfevents*"), recursive=True)
+    for event_file in event_files:
+        try:
+            accumulator = EventAccumulator(event_file, size_guidance={"scalars": 0})
+            accumulator.Reload()
+            if tag not in accumulator.Tags().get("scalars", []):
+                continue
+            points.extend((event.step, event.value) for event in accumulator.Scalars(tag))
+        except Exception:
+            continue
+
+    if not points:
+        return None
+
+    latest_by_step = {}
+    for step, value in points:
+        latest_by_step[int(step)] = float(value)
+
+    steps = np.array(sorted(latest_by_step), dtype=np.int64)
+    values = np.array([latest_by_step[int(step)] for step in steps], dtype=np.float64)
+    return steps, values
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -62,23 +167,25 @@ best_ts = None
 final_ts = None
 best_val = None
 
-if os.path.isfile(EVAL_NPZ):
-    data      = np.load(EVAL_NPZ)
-    timesteps = data["timesteps"]
-    results   = data["results"]
-    mean_rew  = results.mean(axis=1)
-    std_rew   = results.std(axis=1)
+eval_history = load_eval_history()
+
+if eval_history is not None:
+    timesteps, mean_rew, std_rew = eval_history
     best_idx  = int(np.argmax(mean_rew))
     best_ts   = timesteps[best_idx]
     final_ts  = timesteps[-1]
     best_val  = mean_rew[best_idx]
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(timesteps, smooth(mean_rew), color=COLORS["best"],
-            linewidth=2, label="Smoothed mean reward", zorder=3)
+    y_min, y_max = reward_ylim(mean_rew)
+    clipped_low = int(np.sum(mean_rew < y_min))
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(timesteps, smooth(mean_rew, weight=0.65), color=COLORS["best"],
+            linewidth=2.6, label="Smoothed mean reward", zorder=3)
     ax.fill_between(timesteps, mean_rew - std_rew, mean_rew + std_rew,
-                    color=COLORS["best"], alpha=0.15, label="+-1 std")
-    ax.plot(timesteps, mean_rew, color=COLORS["best"], alpha=0.2, linewidth=0.6)
+                    color=COLORS["best"], alpha=0.10, label="+-1 std")
+    ax.plot(timesteps, mean_rew, color=COLORS["best"], alpha=0.25, linewidth=0.8)
+    ax.scatter(timesteps, mean_rew, color=COLORS["best"], alpha=0.18, s=8, linewidths=0)
 
     # Best checkpoint marker
     ax.axvline(best_ts, color=COLORS["green"], linestyle="--", linewidth=1.5,
@@ -104,13 +211,85 @@ if os.path.isfile(EVAL_NPZ):
                  fontsize=14, fontweight="bold")
     ax.set_xlabel("Training Steps", fontsize=11)
     ax.set_ylabel("Mean Episode Reward", fontsize=11)
-    ax.legend(fontsize=10, loc="lower right")
+    ax.set_xlim(0, final_ts)
+    ax.set_ylim(y_min, y_max)
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_axis_ts))
+    ax.xaxis.set_major_locator(MultipleLocator(500000))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_axis_reward))
+    ax.yaxis.set_major_locator(MultipleLocator(5000))
+    if clipped_low:
+        ax.text(0.01, 0.02, f"{clipped_low} very low outlier(s) clipped for readability",
+                transform=ax.transAxes, fontsize=9, color="#555")
+
+    ax.legend(fontsize=10, loc="upper left")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     out = os.path.join(OUT_DIR, "01_training_curve.png")
     plt.savefig(out, dpi=150)
     plt.close()
     print(f"  Saved: {out}")
+
+    if os.path.isfile(EVAL_NPZ):
+        zoom_data = np.load(EVAL_NPZ)
+        zoom_ts = zoom_data["timesteps"]
+        zoom_results = zoom_data["results"]
+        zoom_mean = zoom_results.mean(axis=1)
+        zoom_std = zoom_results.std(axis=1)
+        zoom_smooth = rolling_mean(zoom_mean, window=7)
+
+        zoom_best_idx = int(np.argmax(zoom_mean))
+        zoom_best_ts = zoom_ts[zoom_best_idx]
+        zoom_best_val = zoom_mean[zoom_best_idx]
+        zoom_final_ts = zoom_ts[-1]
+        zoom_final_val = zoom_mean[-1]
+
+        fig, ax = plt.subplots(figsize=(14, 6))
+        ax.fill_between(zoom_ts, zoom_mean - zoom_std, zoom_mean + zoom_std,
+                        color=COLORS["best"], alpha=0.16, label="+-1 std")
+        ax.plot(zoom_ts, zoom_mean, color=COLORS["best"], alpha=0.45,
+                linewidth=1.8, label="Raw mean reward", zorder=3)
+        ax.scatter(zoom_ts, zoom_mean, color=COLORS["best"], alpha=0.35,
+                   s=14, linewidths=0)
+        ax.plot(zoom_ts, zoom_smooth, color=COLORS["best"], linewidth=3.0,
+                label="Smoothed mean reward", zorder=4)
+
+        ax.axvline(zoom_best_ts, color=COLORS["green"], linestyle="--", linewidth=1.8,
+                   label=f"Optimal Stop @ step {zoom_best_ts:,}")
+        ax.scatter([zoom_best_ts], [zoom_best_val], color=COLORS["green"],
+                   s=95, zorder=5)
+        ax.annotate(f"Optimal Stop:\n{zoom_best_val:.0f} @ step {zoom_best_ts:,}",
+                    xy=(zoom_best_ts, zoom_best_val), xytext=(18, 20),
+                    textcoords="offset points", fontsize=10, fontweight="bold",
+                    color=COLORS["green"],
+                    arrowprops=dict(arrowstyle="->", color=COLORS["green"]))
+
+        ax.scatter([zoom_final_ts], [zoom_final_val], color=COLORS["final"],
+                   s=95, zorder=5, marker="D")
+        ax.annotate(f"Final:\n{zoom_final_val:.0f}",
+                    xy=(zoom_final_ts, zoom_final_val), xytext=(-78, -35),
+                    textcoords="offset points", fontsize=10, fontweight="bold",
+                    color=COLORS["final"],
+                    arrowprops=dict(arrowstyle="->", color=COLORS["final"]))
+
+        y_low = min((zoom_mean - zoom_std).min(), zoom_smooth.min())
+        y_high = max((zoom_mean + zoom_std).max(), zoom_smooth.max())
+        y_pad = (y_high - y_low) * 0.10
+        ax.set_xlim(3_000_000, zoom_final_ts + 12_000)
+        ax.set_ylim(y_low - y_pad, y_high + y_pad)
+        ax.xaxis.set_major_formatter(FuncFormatter(fmt_axis_ts))
+        ax.xaxis.set_major_locator(MultipleLocator(50_000))
+        ax.yaxis.set_major_locator(MultipleLocator(200))
+        ax.set_title("PPO Evaluation Reward - 3.0M to 3.33M Steps",
+                     fontsize=14, fontweight="bold")
+        ax.set_xlabel("Training Steps", fontsize=11)
+        ax.set_ylabel("Mean Episode Reward", fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10, loc="lower left")
+        plt.tight_layout()
+        zoom_out = os.path.join(OUT_DIR, "01_training_curve_3m_to_3_3m.png")
+        plt.savefig(zoom_out, dpi=180)
+        plt.close()
+        print(f"  Saved: {zoom_out}")
 else:
     print("  [SKIP] evaluations.npz not found")
 
@@ -118,6 +297,46 @@ else:
 # ═════════════════════════════════════════════════════════════════════════════
 # PART 2: Head-to-head SUMO simulation
 # ═════════════════════════════════════════════════════════════════════════════
+print("\n[1b] Plotting PPO value loss and entropy ...")
+value_loss_history = load_tensorboard_scalar("train/value_loss")
+entropy_loss_history = load_tensorboard_scalar("train/entropy_loss")
+
+if value_loss_history is not None and entropy_loss_history is not None:
+    value_steps, value_loss = value_loss_history
+    entropy_steps, entropy_loss = entropy_loss_history
+    entropy = -entropy_loss
+
+    fig, ax1 = plt.subplots(figsize=(14, 5.5))
+    ax2 = ax1.twinx()
+
+    ax1.plot(value_steps, value_loss, color="#2563EB", linewidth=2.4,
+             label="Value loss")
+    ax2.plot(entropy_steps, entropy, color="#F97316", linewidth=2.4,
+             label="Entropy")
+
+    ax1.set_title("PPO Training Diagnostics - Value Loss and Entropy",
+                  fontsize=14, fontweight="bold")
+    ax1.set_xlabel("Training Steps", fontsize=11)
+    ax1.set_ylabel("Value Loss", fontsize=11, color="#2563EB")
+    ax2.set_ylabel("Entropy", fontsize=11, color="#F97316")
+    ax1.xaxis.set_major_formatter(FuncFormatter(fmt_axis_ts))
+    ax1.xaxis.set_major_locator(MultipleLocator(500000))
+    ax1.tick_params(axis="y", labelcolor="#2563EB")
+    ax2.tick_params(axis="y", labelcolor="#F97316")
+    ax1.grid(True, alpha=0.3)
+
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right")
+
+    plt.tight_layout()
+    out = os.path.join(OUT_DIR, "04_value_loss_entropy.png")
+    plt.savefig(out, dpi=180)
+    plt.close()
+    print(f"  Saved: {out}")
+else:
+    print("  [SKIP] TensorBoard value_loss/entropy_loss scalars not found")
+
 print("\n[2/3] Running head-to-head comparison in SUMO ...")
 
 # Check SUMO
@@ -288,15 +507,11 @@ if sim_results and len(sim_results) == 2:
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.3)
 
     # Panel 1: Training curve
-    if os.path.isfile(EVAL_NPZ):
+    if eval_history is not None:
         ax1 = fig.add_subplot(gs[0, :])
-        data = np.load(EVAL_NPZ)
-        ts = data["timesteps"]
-        mr = data["results"].mean(axis=1)
+        ts, mr, sr = eval_history
         ax1.plot(ts, smooth(mr), color=COLORS["best"], linewidth=2)
-        ax1.fill_between(ts, mr - data["results"].std(axis=1),
-                         mr + data["results"].std(axis=1),
-                         color=COLORS["best"], alpha=0.1)
+        ax1.fill_between(ts, mr - sr, mr + sr, color=COLORS["best"], alpha=0.1)
         if best_ts is not None:
             ax1.axvline(best_ts, color=COLORS["green"], linestyle="--", linewidth=1.5,
                         label=f"Optimal Stop Point ({fmt_ts(best_ts)})")
@@ -304,6 +519,12 @@ if sim_results and len(sim_results) == 2:
 
         ax1.set_xlabel("Steps")
         ax1.set_ylabel("Mean Reward")
+        ax1.set_xlim(0, final_ts if final_ts is not None else ts[-1])
+        ax1.set_ylim(*reward_ylim(mr))
+        ax1.xaxis.set_major_formatter(FuncFormatter(fmt_axis_ts))
+        ax1.xaxis.set_major_locator(MultipleLocator(500000))
+        ax1.yaxis.set_major_formatter(FuncFormatter(fmt_axis_reward))
+        ax1.yaxis.set_major_locator(MultipleLocator(5000))
         ax1.legend(fontsize=9)
         ax1.grid(True, alpha=0.3)
 
