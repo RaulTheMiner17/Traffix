@@ -141,11 +141,11 @@
                 <div class="info-card">
                     <h4 class="info-title">How Metrics Are Computed</h4>
                     <ul class="info-list">
-                        <li><strong>Vehicle Count:</strong> YOLO11n detections (cars, bikes, buses, trucks)</li>
+                        <li><strong>Vehicle Count:</strong> YOLO11s detections for vehicles plus emergency ambulance detector</li>
                         <li><strong>Queue:</strong> Vehicles counted when density > 60%</li>
                         <li><strong>Density:</strong> count / max_capacity (20 vehicles)</li>
                         <li><strong>Wait Time:</strong> density × (1 - speed_factor) × 120s</li>
-                        <li><strong>Throughput:</strong> Total vehicles per minute (rolling window)</li>
+                        <li><strong>Throughput:</strong> vehicle count x speed factor x 3 vehicles/min proxy</li>
                     </ul>
                 </div>
                 <div class="info-card">
@@ -153,7 +153,8 @@
                     <ul class="info-list">
                         <li><strong>Observation:</strong> 15-dim vector (4× queue, density, speed + phase + time)</li>
                         <li><strong>Model:</strong> PPO with VecNormalize (or max-pressure fallback)</li>
-                        <li><strong>Actions:</strong> 0 = NS Green, 1 = EW Green</li>
+                        <li><strong>Actions:</strong> 0/1 = NS straight/left, 2/3 = EW straight/left</li>
+                        <li><strong>Live Guard:</strong> Max-pressure and emergency vehicle priority override unsafe PPO choices</li>
                         <li><strong>Sub-phases:</strong> Left Turn (5s) → Straight (8s) → Right Turn (4s) → Yellow (3s)</li>
                         <li class="mt-2"><em>Static baseline uses a simple fixed 30‑second cycle for comparison.</em></li>
                     </ul>

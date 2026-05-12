@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['My First Project - v1 2025-02-17 5-45am', 'ambulance']
+
+roboflow:
+  workspace: himank-vpetc
+  project: ambulance-4bova
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/himank-vpetc/ambulance-4bova/dataset/1

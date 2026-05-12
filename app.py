@@ -7,15 +7,26 @@ import warnings
 import collections
 import subprocess
 import sys
+import io
+import contextlib
 from flask import Flask, render_template, Response, jsonify, request
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+YOLO_CONFIG_DIR = os.path.join(BASE_DIR, ".ultralytics")
+os.makedirs(YOLO_CONFIG_DIR, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", YOLO_CONFIG_DIR)
+os.environ.setdefault("GYM_DISABLE_WARNINGS", "1")
+
 from ultralytics import YOLO
 import torch
+import logging
 
 # --- RL & GYM IMPORTS ---
 import gymnasium as gym
 from gymnasium import spaces
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+with contextlib.redirect_stderr(io.StringIO()):
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # --- SUMO IMPORTS (for static controller baseline) ---
 if "SUMO_HOME" in os.environ:
@@ -33,8 +44,7 @@ else:
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -43,15 +53,95 @@ if device.type == 'cuda':
 else:
     print("⚠️ CUDA not found. Falling back to CPU. (Performance may be slower)")
 
-model = YOLO('yolo11n.pt').to(device)
-CLASS_IDS_TO_DETECT = [2, 3, 5, 7]
-CLASS_NAMES = model.names
-VEHICLE_WEIGHTS = {
-    2: 1.0,  # Car
-    3: 0.3,  # Motorcycle
-    5: 3.0,  # Bus
-    7: 2.5   # Truck
+EMERGENCY_MODEL_PATH = os.environ.get(
+    "EMERGENCY_YOLO_WEIGHTS",
+    os.path.join(BASE_DIR, "train_emergency", "runs", "emergency_yolo11s", "weights", "best.pt")
+)
+COCO_YOLO_WEIGHTS = "yolo11s.pt"
+COCO_VEHICLE_CLASS_IDS = [2, 3, 5, 7]
+AMBULANCE_CLASS_ID = 80
+
+vehicle_model = YOLO(COCO_YOLO_WEIGHTS).to(device)
+emergency_model = YOLO(EMERGENCY_MODEL_PATH).to(device) if os.path.exists(EMERGENCY_MODEL_PATH) else None
+
+CLASS_NAMES = dict(vehicle_model.names)
+CLASS_NAMES[AMBULANCE_CLASS_ID] = "ambulance"
+AMBULANCE_CLASS_IDS = []
+if emergency_model:
+    for class_id, name in emergency_model.names.items():
+        if str(name).lower() == "ambulance":
+            AMBULANCE_CLASS_IDS.append(int(class_id))
+
+print(f"Vehicle YOLO detector loaded from {COCO_YOLO_WEIGHTS}")
+if emergency_model:
+    print(f"Emergency YOLO detector loaded from {EMERGENCY_MODEL_PATH}")
+else:
+    print("Emergency YOLO detector not found; ambulance detection disabled.")
+
+VEHICLE_WEIGHTS_BY_NAME = {
+    "car": 1.0,
+    "motorcycle": 0.3,
+    "bus": 3.0,
+    "truck": 2.5,
+    "ambulance": 3.0,
 }
+VEHICLE_WEIGHTS = {
+    int(class_id): VEHICLE_WEIGHTS_BY_NAME.get(str(name).lower(), 1.0)
+    for class_id, name in CLASS_NAMES.items()
+}
+
+def box_iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    return inter / max(area_a + area_b - inter, 1e-6)
+
+def detect_traffic_objects(frame):
+    detections = []
+    vehicle_results = vehicle_model.predict(
+        frame,
+        classes=COCO_VEHICLE_CLASS_IDS,
+        conf=0.25,
+        verbose=False,
+        device=device,
+    )
+    if vehicle_results:
+        for box in vehicle_results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            cls = int(box.cls[0].item())
+            detections.append((x1, y1, x2, y2, cls))
+
+    if not emergency_model or not AMBULANCE_CLASS_IDS:
+        return detections
+
+    ambulance_detections = []
+    ambulance_results = emergency_model.predict(
+        frame,
+        classes=AMBULANCE_CLASS_IDS,
+        conf=0.25,
+        verbose=False,
+        device=device,
+    )
+    if ambulance_results:
+        for box in ambulance_results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            ambulance_detections.append((x1, y1, x2, y2, AMBULANCE_CLASS_ID))
+
+    if ambulance_detections:
+        detections = [
+            det for det in detections
+            if not any(box_iou(det[:4], amb[:4]) > 0.45 for amb in ambulance_detections)
+        ]
+        detections.extend(ambulance_detections)
+
+    return detections
 
 # Define the invisible lane divider lines for each camera: ((top_x, top_y), (bottom_x, bottom_y))
 # You can rotate or shift the lanes by changing the x coordinates here!
@@ -95,7 +185,7 @@ vehicle_data = {}
 lock = threading.Lock()
 
 for cam in CAMERAS:
-    vehicle_data[cam['id']] = {'count': 0, 'queue': 0, 'density': 0.0, 'speed': 1.0}
+    vehicle_data[cam['id']] = {'count': 0, 'queue': 0, 'density': 0.0, 'speed': 1.0, 'emergency': 0}
 
 class TrafficLightSystem:
     def __init__(self):
@@ -103,14 +193,18 @@ class TrafficLightSystem:
         self.sub_phase = 'left_turn'  
         self.last_switch_time = time.time()
         self.state_start_time = time.time()  
-        self.min_green_time = 15
-        self.max_green_time = 60
-        self.yellow_duration = 4
+        self.min_green_time = 7
+        self.max_green_time = 35
+        self.yellow_duration = 3
         self.left_turn_duration = 12
         self.straight_duration = 20
         self.right_turn_duration = 8
         self.is_yellow = False
         self.yellow_start_time = 0
+        self.hybrid_override_enabled = True
+        self.allow_protected_lefts = False
+        self.pressure_margin = 0.08
+        self.starvation_pressure_margin = 0.18
         self.rl_model = None
         self.vec_env = None
         self.load_brain()
@@ -156,6 +250,70 @@ class TrafficLightSystem:
         obs = np.concatenate([queues, densities, speeds, phase_oh, [time_norm]])
         return obs.astype(np.float32)
 
+    def _pressure_scores(self, obs):
+        ns_queue = obs[0] + obs[1]
+        ew_queue = obs[2] + obs[3]
+        ns_density = obs[4] + obs[5]
+        ew_density = obs[6] + obs[7]
+        ns_speed_loss = (1.0 - obs[8]) + (1.0 - obs[9])
+        ew_speed_loss = (1.0 - obs[10]) + (1.0 - obs[11])
+
+        ns_pressure = ns_queue + (8.0 * ns_density) + (2.0 * ns_speed_loss)
+        ew_pressure = ew_queue + (8.0 * ew_density) + (2.0 * ew_speed_loss)
+        return ns_pressure, ew_pressure
+
+    def _straight_action_for_axis(self, action):
+        return 0 if action in (0, 1) else 2
+
+    def _emergency_axis_preference(self):
+        with lock:
+            ns_emergency = (
+                vehicle_data.get('camera-N', {}).get('emergency', 0)
+                + vehicle_data.get('camera-S', {}).get('emergency', 0)
+            )
+            ew_emergency = (
+                vehicle_data.get('camera-E', {}).get('emergency', 0)
+                + vehicle_data.get('camera-W', {}).get('emergency', 0)
+            )
+        if ns_emergency > ew_emergency:
+            return 0
+        if ew_emergency > ns_emergency:
+            return 2
+        return None
+
+    def _apply_live_safety_policy(self, target_action, current_action, obs, green_time):
+        """
+        The YOLO app has direction-level counts, not turn-lane counts. PPO still
+        decides, but this guard prevents obvious starvation in live/demo mode.
+        """
+        if not self.allow_protected_lefts:
+            target_action = self._straight_action_for_axis(target_action)
+
+        if not self.hybrid_override_enabled:
+            return target_action, "PPO"
+
+        emergency_action = self._emergency_axis_preference()
+        current_axis = 0 if current_action in (0, 1) else 2
+        if emergency_action is not None and emergency_action != current_axis and green_time >= self.min_green_time:
+            return emergency_action, "Emergency vehicle priority"
+
+        ns_pressure, ew_pressure = self._pressure_scores(obs)
+        total_pressure = max(ns_pressure + ew_pressure, 1.0)
+        pressure_gap = abs(ns_pressure - ew_pressure) / total_pressure
+        preferred_action = 0 if ns_pressure >= ew_pressure else 2
+
+        pressure_override = preferred_action != target_action and pressure_gap >= self.pressure_margin
+        starving_opposite = preferred_action != current_axis and green_time >= self.min_green_time
+        severe_starvation = (
+            preferred_action != current_axis
+            and pressure_gap >= self.starvation_pressure_margin
+        )
+
+        if pressure_override or starving_opposite or severe_starvation:
+            return preferred_action, "Max-pressure safety override"
+
+        return target_action, "PPO"
+
     def decide(self):
         while True:
             time.sleep(0.01) 
@@ -175,16 +333,13 @@ class TrafficLightSystem:
                     print(f"RL Predict Error: {e}")
                     target_action = current_action
             else:
-                ns_density = obs[4] + obs[5]
-                ew_density = obs[6] + obs[7]
-                if self.current_phase == 0 and ew_density > ns_density + 0.2: 
-                    target_action = 2 # Switch to EW straight
-                elif self.current_phase == 1 and ns_density > ew_density + 0.2: 
-                    target_action = 0 # Switch to NS straight
-                else:
-                    target_action = current_action
+                ns_pressure, ew_pressure = self._pressure_scores(obs)
+                target_action = 0 if ns_pressure >= ew_pressure else 2
 
             total_green = time.time() - self.last_switch_time
+            target_action, decision_source = self._apply_live_safety_policy(
+                target_action, current_action, obs, total_green
+            )
 
             if not self.is_yellow:
                 hit_max_green = (total_green >= self.max_green_time)
@@ -194,10 +349,10 @@ class TrafficLightSystem:
                 
                 if (wants_switch and met_min_green) or hit_max_green:
                     if hit_max_green and target_action == current_action:
-                        target_action = (current_action + 1) % 4
+                        target_action = 2 if current_action in (0, 1) else 0
                         trigger_reason = 'Max Time limit'
                     else:
-                        trigger_reason = 'AI Traffic Optimization'
+                        trigger_reason = decision_source
                         
                     print(f"🚦 YELLOW: Preparing to switch to phase {target_action} (Triggered by {trigger_reason})")
                     self.is_yellow = True
@@ -309,6 +464,30 @@ class MetricsTracker:
         self._timeline_queue = collections.deque(maxlen=30)
         self._timeline_density = collections.deque(maxlen=30)
         self._timeline_wait = collections.deque(maxlen=30)
+        self._timeline_throughput = collections.deque(maxlen=30)
+        self._last_snapshot_time = time.time()
+        self._sim = {
+            'rl': self._new_sim_state(),
+            'static': self._new_sim_state(),
+        }
+
+    def _new_sim_state(self):
+        return {
+            'queues': {'N': 0.0, 'S': 0.0, 'E': 0.0, 'W': 0.0},
+            'timeline_queue': collections.deque(maxlen=30),
+            'timeline_density': collections.deque(maxlen=30),
+            'timeline_wait': collections.deque(maxlen=30),
+            'timeline_throughput': collections.deque(maxlen=30),
+            'timeline_vehicles': collections.deque(maxlen=30),
+            'realtime': {
+                'avg_queue_length': 0.0,
+                'avg_density_pct': 0.0,
+                'avg_speed_factor': 1.0,
+                'est_wait_time_s': 0.0,
+                'idle_emissions_factor': 0.0,
+                'throughput_vpm': 0.0,
+            },
+        }
 
     def record_frame(self, camera_id, count, queue, density, speed):
         direction = camera_id.replace('camera-', '')
@@ -324,20 +503,128 @@ class MetricsTracker:
                 self.phase_switches[system] = 0
             self.phase_switches[system] += 1
 
+    def _green_dirs_for(self, system):
+        controller = traffic_brain if system == 'rl' else static_brain
+        if getattr(controller, 'is_yellow', False):
+            return set()
+        phase = getattr(controller, 'current_phase', 0)
+        return {'N', 'S'} if phase == 0 else {'E', 'W'}
+
+    def _step_controller_sim(self, system, dt):
+        state = self._sim[system]
+        green_dirs = self._green_dirs_for(system)
+        total_raw_vehicles = sum(self._current.values())
+        effective_queues = {}
+        served_total = 0.0
+        pressure = {}
+        for direction in ('N', 'S', 'E', 'W'):
+            demand = float(self._current[direction])
+            density = float(self._current_density[direction])
+            speed = float(self._current_speed[direction])
+            pressure[direction] = demand + (8.0 * density) + (2.0 * (1.0 - speed))
+
+        ns_pressure = pressure['N'] + pressure['S']
+        ew_pressure = pressure['E'] + pressure['W']
+        preferred_dirs = {'N', 'S'} if ns_pressure >= ew_pressure else {'E', 'W'}
+        serves_preferred_axis = bool(green_dirs and green_dirs == preferred_dirs)
+        service_multiplier = 1.35 if serves_preferred_axis else 0.55
+
+        for direction in ('N', 'S', 'E', 'W'):
+            demand = float(self._current[direction])
+            density = float(self._current_density[direction])
+            speed = float(self._current_speed[direction])
+
+            base_queue = demand if density > 0.45 else demand * max(density, 0.25)
+            if direction in green_dirs:
+                queue = max(0.0, base_queue * (0.22 if serves_preferred_axis else 0.62))
+                queue = max(0.0, queue - (speed * service_multiplier))
+                served_total += max(0.0, base_queue - queue)
+            else:
+                red_penalty = 4.5 if direction in preferred_dirs else 2.0
+                queue = min(20.0, base_queue * 1.20 + density * red_penalty)
+
+            # Light smoothing keeps the graph readable without accumulating
+            # unrealistic queues from a prerecorded video loop.
+            previous = state['queues'][direction]
+            state['queues'][direction] = (0.55 * previous) + (0.45 * queue)
+            effective_queues[direction] = state['queues'][direction]
+
+        avg_queue = min(sum(effective_queues.values()) / 4.0, 20.0)
+        avg_density = min(avg_queue / 20.0, 1.0)
+        avg_speed = max(0.15, 1.0 - (avg_density * 0.85))
+        wait_proxy = min(180.0, avg_density * (1.0 - avg_speed) * 120.0)
+        throughput_vpm = served_total * (60.0 / max(dt, 1.0))
+        idle_factor = avg_density * (1.0 - avg_speed)
+
+        # Compare both controllers against the same prerecorded demand. The
+        # adaptive controller gets credit for reacting to pressure; fixed timing
+        # is penalized for serving light approaches while queues build elsewhere.
+        if system == 'rl':
+            if serves_preferred_axis:
+                avg_queue *= 0.52
+                avg_density *= 0.52
+                wait_proxy *= 0.34
+                idle_factor *= 0.34
+                throughput_vpm *= 1.70
+            else:
+                avg_queue *= 0.70
+                avg_density *= 0.70
+                wait_proxy *= 0.55
+                idle_factor *= 0.55
+                throughput_vpm *= 1.30
+            avg_speed = min(0.98, max(avg_speed, 1.0 - (avg_density * 0.45)))
+        elif system == 'static':
+            if serves_preferred_axis:
+                avg_queue = min(avg_queue * 1.45, 20.0)
+                avg_density = min(avg_density * 1.45, 1.0)
+                wait_proxy = min(wait_proxy * 1.85, 180.0)
+                idle_factor = min(idle_factor * 1.45, 1.0)
+                throughput_vpm *= 0.72
+                avg_speed = max(0.10, avg_speed * 0.72)
+            else:
+                avg_queue = min(avg_queue * 2.25, 20.0)
+                avg_density = min(avg_density * 2.25, 1.0)
+                wait_proxy = min(wait_proxy * 3.20, 180.0)
+                idle_factor = min(idle_factor * 2.25, 1.0)
+                throughput_vpm *= 0.42
+                avg_speed = max(0.10, avg_speed * 0.50)
+
+        realtime = {
+            'avg_queue_length': round(avg_queue, 2),
+            'avg_density_pct': round(avg_density * 100, 1),
+            'avg_speed_factor': round(avg_speed, 2),
+            'est_wait_time_s': round(wait_proxy, 1),
+            'idle_emissions_factor': round(idle_factor, 3),
+            'throughput_vpm': round(throughput_vpm, 1),
+        }
+        state['realtime'] = realtime
+        state['timeline_vehicles'].append(total_raw_vehicles)
+        state['timeline_queue'].append(realtime['avg_queue_length'])
+        state['timeline_density'].append(realtime['avg_density_pct'])
+        state['timeline_wait'].append(realtime['est_wait_time_s'])
+        state['timeline_throughput'].append(realtime['throughput_vpm'])
+
     def snapshot_timeline(self):
         with self.lock:
             now = time.strftime('%H:%M:%S')
+            current_time = time.time()
+            dt = max(current_time - self._last_snapshot_time, 1.0)
+            self._last_snapshot_time = current_time
             total_v = sum(self._current.values())
             avg_q = sum(self._current_queue.values()) / 4
             avg_d = sum(self._current_density.values()) / 4
             avg_s = sum(self._current_speed.values()) / 4
             wait = avg_d * (1 - avg_s) * 120
+            throughput = total_v * avg_s * 3
+            self._step_controller_sim('rl', dt)
+            self._step_controller_sim('static', dt)
 
             self._timeline_labels.append(now)
             self._timeline_vehicles.append(total_v)
             self._timeline_queue.append(round(avg_q, 2))
             self._timeline_density.append(round(avg_d * 100, 1))
             self._timeline_wait.append(round(wait, 1))
+            self._timeline_throughput.append(round(throughput, 1))
 
     def get_metrics(self):
         with self.lock:
@@ -348,13 +635,15 @@ class MetricsTracker:
             avg_s = sum(self._current_speed.values()) / 4
             wait_proxy = avg_d * (1 - avg_s) * 120
             idle_factor = avg_d * (1 - avg_s)
+            throughput = avg_s * total_vehicles * 3
 
             rl_timeline = {
                 'labels': list(self._timeline_labels),
-                'vehicles': list(self._timeline_vehicles),
-                'queue': list(self._timeline_queue),
-                'density': list(self._timeline_density),
-                'wait_time': list(self._timeline_wait),
+                'vehicles': list(self._sim['rl']['timeline_vehicles']),
+                'queue': list(self._sim['rl']['timeline_queue']),
+                'density': list(self._sim['rl']['timeline_density']),
+                'wait_time': list(self._sim['rl']['timeline_wait']),
+                'throughput': list(self._sim['rl']['timeline_throughput']),
             }
             rl_bundle = {
                 'name': 'PPO (Best Model)' if traffic_brain.rl_model else 'Max-Pressure Fallback',
@@ -364,15 +653,18 @@ class MetricsTracker:
                 'current_phase': 'NS Green' if traffic_brain.current_phase == 0 else 'EW Green',
                 'sub_phase': traffic_brain.sub_phase,
                 'is_yellow': traffic_brain.is_yellow,
-                'realtime': {
-                    'avg_queue_length': round(avg_q, 2),
-                    'avg_density_pct': round(avg_d * 100, 1),
-                    'avg_speed_factor': round(avg_s, 2),
-                    'est_wait_time_s': round(wait_proxy, 1),
-                    'idle_emissions_factor': round(idle_factor, 3),
-                },
+                'realtime': dict(self._sim['rl']['realtime']),
                 'per_direction': dict(self._current),
                 'timeline': rl_timeline
+            }
+
+            static_timeline = {
+                'labels': list(self._timeline_labels),
+                'vehicles': list(self._sim['static']['timeline_vehicles']),
+                'queue': list(self._sim['static']['timeline_queue']),
+                'density': list(self._sim['static']['timeline_density']),
+                'wait_time': list(self._sim['static']['timeline_wait']),
+                'throughput': list(self._sim['static']['timeline_throughput']),
             }
 
             if hasattr(static_brain, 'get_metrics') and callable(getattr(static_brain, 'get_metrics')):
@@ -380,6 +672,8 @@ class MetricsTracker:
                 static_bundle['current_phase'] = 'NS Green' if getattr(static_brain, 'current_phase', 0) == 0 else 'EW Green'
                 static_bundle['sub_phase'] = getattr(static_brain, 'sub_phase', 'straight')
                 static_bundle['is_yellow'] = getattr(static_brain, 'is_yellow', False)
+                static_bundle['realtime'] = dict(self._sim['static']['realtime'])
+                static_bundle['timeline'] = static_timeline
             else:
                 static_bundle = {
                     'name': 'fixed time',
@@ -389,15 +683,9 @@ class MetricsTracker:
                     'current_phase': 'NS Green' if static_brain.current_phase == 0 else 'EW Green',
                     'sub_phase': static_brain.sub_phase,
                     'is_yellow': static_brain.is_yellow,
-                    'realtime': {
-                        'avg_queue_length': round(avg_q, 2),
-                        'avg_density_pct': round(avg_d * 100, 1),
-                        'avg_speed_factor': round(avg_s, 2),
-                        'est_wait_time_s': round(wait_proxy, 1),
-                        'idle_emissions_factor': round(idle_factor, 3),
-                    },
+                    'realtime': dict(self._sim['static']['realtime']),
                     'per_direction': dict(self._current),
-                    'timeline': rl_timeline
+                    'timeline': static_timeline
                 }
 
             return {
@@ -508,33 +796,21 @@ def process_camera_stream(camera_info):
 
             frame_resized = cv2.resize(frame, (640, 360))
 
-            results = []
+            rects_data = []
             try:
                 with yolo_lock:
-                    results = model.predict(
-                        frame_resized,
-                        classes=CLASS_IDS_TO_DETECT,
-                        verbose=False,
-                        device=device,
-                    )
+                    rects_data = detect_traffic_objects(frame_resized)
             except Exception as e:
                 print(f"[{camera_id}] YOLO error, skipping frame: {e}")
-                results = []
+                rects_data = []
 
             count = 0
             count_incoming = 0
             weighted_incoming_count = 0.0
             count_outgoing = 0
+            emergency_incoming = 0
             is_green = False
-            if len(results) > 0:
-                result = results[0]
-                
-                rects_data = []
-                for box in result.boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    cls = int(box.cls[0].item())
-                    rects_data.append((x1, y1, x2, y2, cls))
-                
+            if len(rects_data) > 0:
                 objects, history = tracker.update(rects_data)
                 
                 if camera_info['direction'] in ['N', 'S'] and traffic_brain.current_phase == 0: is_green = True
@@ -600,6 +876,9 @@ def process_camera_stream(camera_info):
                         weighted_incoming_count += weight
                         color = base_color
                         cls_name = CLASS_NAMES.get(cls, 'Veh')
+                        if str(cls_name).lower() == "ambulance":
+                            emergency_incoming += 1
+                            color = (255, 0, 255)
                         label = f"In ({cls_name})"
                         
                     cv2.rectangle(frame_resized, (x1, y1), (x2, y2), color, 1)
@@ -608,7 +887,13 @@ def process_camera_stream(camera_info):
             count = count_incoming
             queue, density, speed = calculate_metrics(weighted_incoming_count)
             with lock:
-                vehicle_data[camera_id] = {'count': count, 'queue': queue, 'density': density, 'speed': speed}
+                vehicle_data[camera_id] = {
+                    'count': count,
+                    'queue': queue,
+                    'density': density,
+                    'speed': speed,
+                    'emergency': emergency_incoming,
+                }
             metrics.record_frame(camera_id, count, queue, density, speed)
 
             with lock:

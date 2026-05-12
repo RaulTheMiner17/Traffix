@@ -6,12 +6,14 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import subprocess
+import tempfile
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import torch.nn as nn
+import torch
 
 # ---------------------------------------------------------------------------
 # Phase / action mapping
@@ -24,6 +26,30 @@ import torch.nn as nn
 ACTION_TO_SUMO_GREEN = {0: 0, 1: 2, 2: 4, 3: 6}
 NUM_PHASES = 4
 
+ROUTE_DEFINITIONS = [
+    ("N2S", "N2J J2S"),
+    ("S2N", "S2J J2N"),
+    ("E2W", "E2J J2W"),
+    ("W2E", "W2J J2E"),
+    ("N2W_R", "N2J J2W"),
+    ("S2E_R", "S2J J2E"),
+    ("E2N_R", "E2J J2N"),
+    ("W2S_R", "W2J J2S"),
+    ("N2E_L", "N2J J2E"),
+    ("S2W_L", "S2J J2W"),
+    ("E2S_L", "E2J J2S"),
+    ("W2N_L", "W2J J2N"),
+]
+
+ROUTE_GROUPS = {
+    "ns_straight": ["N2S", "S2N"],
+    "ew_straight": ["E2W", "W2E"],
+    "ns_right": ["N2W_R", "S2E_R"],
+    "ew_right": ["E2N_R", "W2S_R"],
+    "ns_left": ["N2E_L", "S2W_L"],
+    "ew_left": ["E2S_L", "W2N_L"],
+}
+
 # --- SUMO CONFIGURATION ---
 if "SUMO_HOME" in os.environ:
     tools = os.path.join(os.environ["SUMO_HOME"], "tools")
@@ -35,13 +61,18 @@ import traci
 
 class SumoEnv(gym.Env):
     def __init__(self, sumo_config="cross.sumocfg", gui=False, max_steps=3600,
-                 port=None):
+                 port=None, randomize_routes=True):
         super().__init__()
 
         self.sumo_binary = "sumo-gui" if gui else "sumo"
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.sumo_config = sumo_config
+        if not os.path.isabs(self.sumo_config):
+            self.sumo_config = os.path.join(self.base_dir, self.sumo_config)
         self.gui = gui
         self.port = port or random.randint(9000, 9999)
+        self.randomize_routes = randomize_routes
+        self.route_file = None
 
         # ------------------------------------------------------------------
         # Action space: 4 phases
@@ -79,9 +110,62 @@ class SumoEnv(gym.Env):
         self.time_since_last_switch = 0
         self.last_action = 0
 
+    def _make_random_route_file(self):
+        """Create one episode's demand profile so PPO does not overfit static timing."""
+        scenario = random.choice(["balanced", "ns_peak", "ew_peak", "left_heavy", "bursty"])
+        base = {
+            "ns_straight": 0.12,
+            "ew_straight": 0.12,
+            "ns_right": 0.04,
+            "ew_right": 0.04,
+            "ns_left": 0.03,
+            "ew_left": 0.03,
+        }
+
+        if scenario == "ns_peak":
+            base["ns_straight"] *= random.uniform(1.5, 2.4)
+            base["ns_right"] *= random.uniform(1.3, 2.0)
+            base["ns_left"] *= random.uniform(1.3, 2.2)
+            base["ew_straight"] *= random.uniform(0.45, 0.85)
+        elif scenario == "ew_peak":
+            base["ew_straight"] *= random.uniform(1.5, 2.4)
+            base["ew_right"] *= random.uniform(1.3, 2.0)
+            base["ew_left"] *= random.uniform(1.3, 2.2)
+            base["ns_straight"] *= random.uniform(0.45, 0.85)
+        elif scenario == "left_heavy":
+            base["ns_left"] *= random.uniform(2.0, 3.5)
+            base["ew_left"] *= random.uniform(2.0, 3.5)
+        elif scenario == "bursty":
+            axis = random.choice(["ns", "ew"])
+            base[f"{axis}_straight"] *= random.uniform(2.0, 3.0)
+            base[f"{axis}_right"] *= random.uniform(1.5, 2.5)
+            base[f"{axis}_left"] *= random.uniform(1.5, 2.5)
+
+        route_prob = {}
+        for group, routes in ROUTE_GROUPS.items():
+            for route in routes:
+                route_prob[route] = min(base[group] * random.uniform(0.75, 1.25), 0.45)
+
+        fd, path = tempfile.mkstemp(prefix="traffix_routes_", suffix=".rou.xml", dir=self.base_dir, text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n<routes>\n')
+            f.write('  <vType id="car" accel="2.0" decel="4.5" sigma="0.5" length="5.0" maxSpeed="13.9"/>\n\n')
+            for route_id, edges in ROUTE_DEFINITIONS:
+                f.write(f'  <route id="{route_id}" edges="{edges}"/>\n')
+            f.write("\n")
+            for route_id, prob in route_prob.items():
+                f.write(
+                    f'  <flow id="f_{route_id}" type="car" route="{route_id}" '
+                    f'begin="0" end="{self.max_steps}" probability="{prob:.4f}"/>\n'
+                )
+            f.write("</routes>\n")
+        return path
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.close()
+        if self.randomize_routes:
+            self.route_file = self._make_random_route_file()
         
         # Start SUMO
         cmd = [
@@ -91,6 +175,8 @@ class SumoEnv(gym.Env):
             "--waiting-time-memory", "1000",
             "--time-to-teleport", "-1"
         ]
+        if self.route_file:
+            cmd.extend(["--route-files", self.route_file])
         if self.gui:
             cmd.append("--quit-on-end")
             cmd.append("--start")
@@ -148,6 +234,7 @@ class SumoEnv(gym.Env):
             self.t += 1
             self.time_since_last_switch += 1
             reward -= self._calculate_pressure_reward()
+            reward += 0.08 * traci.simulation.getArrivedNumber()
 
         reward -= switch_penalty
 
@@ -214,10 +301,16 @@ class SumoEnv(gym.Env):
         total_wait = 0
         total_density = 0.0
         max_veh_wait = 0.0
+        lane_queues = {}
+        lane_waits = {}
 
         for lane in self.lanes:
-            total_queue += traci.lane.getLastStepHaltingNumber(lane)
-            total_wait += traci.lane.getWaitingTime(lane)
+            queue = traci.lane.getLastStepHaltingNumber(lane)
+            wait = traci.lane.getWaitingTime(lane)
+            lane_queues[lane] = queue
+            lane_waits[lane] = wait
+            total_queue += queue
+            total_wait += wait
             veh_count = traci.lane.getLastStepVehicleNumber(lane)
             lane_len = traci.lane.getLength(lane)
             total_density += veh_count / max(lane_len / 5.0, 1.0)
@@ -231,15 +324,23 @@ class SumoEnv(gym.Env):
         avg_queue = total_queue / len(self.lanes)
         avg_wait = total_wait / len(self.lanes)
         avg_density = total_density / len(self.lanes)
+        if self.current_phase in (0, 1):
+            red_lanes = ["E2J_0", "W2J_0"]
+        else:
+            red_lanes = ["N2J_0", "S2J_0"]
+        red_queue = sum(lane_queues[lane] for lane in red_lanes) / len(red_lanes)
+        red_wait = sum(lane_waits[lane] for lane in red_lanes) / len(red_lanes)
 
         # Weighted combination.
         # Smaller values are better, so the PPO policy is trained to reduce
         # the same traffic indicators the dashboard displays.
         penalty = (
-            0.70 * avg_queue
-            + 0.20 * (avg_wait / 60.0)
-            + 0.10 * avg_density
-            + 0.02 * (max_veh_wait / 60.0)
+            0.55 * avg_queue
+            + 0.25 * (avg_wait / 60.0)
+            + 0.15 * avg_density
+            + 0.18 * red_queue
+            + 0.08 * (red_wait / 60.0)
+            + 0.04 * (max_veh_wait / 60.0)
         )
         return penalty
 
@@ -250,6 +351,13 @@ class SumoEnv(gym.Env):
             pass
         if self.proc:
             self.proc.kill()
+            self.proc = None
+        if self.route_file and os.path.exists(self.route_file):
+            try:
+                os.remove(self.route_file)
+            except OSError:
+                pass
+            self.route_file = None
 
 
 # ===============================================================
@@ -264,20 +372,74 @@ def make_env(port=None):
         return Monitor(env)
     return _init
 
+def get_num_train_envs():
+    requested = os.environ.get("TRAFFIX_NUM_ENVS")
+    if requested:
+        return max(1, int(requested))
+
+    cpu_count = os.cpu_count() or 1
+    # SUMO is CPU-bound. Use nearly the whole machine, leaving one core for
+    # Windows, the terminal, and file IO so training does not choke itself.
+    return max(1, cpu_count - 1)
+
+def get_train_device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+def cleanup_temp_route_files():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    for fname in os.listdir(base_dir):
+        if fname.startswith("traffix_routes_") and fname.endswith(".rou.xml"):
+            try:
+                os.remove(os.path.join(base_dir, fname))
+            except OSError:
+                pass
+
 def linear_schedule(initial_lr: float, final_lr: float = 1e-5):
     """Returns a callable that linearly decays the learning rate."""
     def schedule(progress_remaining: float) -> float:
         return final_lr + progress_remaining * (initial_lr - final_lr)
     return schedule
 
+def latest_checkpoint(checkpoint_dir="./logs/checkpoints"):
+    if not os.path.isdir(checkpoint_dir):
+        return None
+    candidates = []
+    for fname in os.listdir(checkpoint_dir):
+        if not fname.startswith("ppo_traffic_") or not fname.endswith("_steps.zip"):
+            continue
+        try:
+            steps = int(fname.replace("ppo_traffic_", "").replace("_steps.zip", ""))
+        except ValueError:
+            continue
+        candidates.append((steps, os.path.join(checkpoint_dir, fname)))
+    return max(candidates, default=(None, None))[1]
+
 
 def train_best_model():
-    TOTAL_TIMESTEPS = 1000_000
+    TOTAL_TIMESTEPS = 2_000_000
+    num_envs = get_num_train_envs()
+    train_device = get_train_device()
+    base_port = 9100
+    rollout_steps = 1024 if num_envs > 1 else 4096
+    batch_size = 512 if num_envs > 1 else 256
+    n_epochs = 10 if num_envs > 1 else 15
+    cleanup_temp_route_files()
+
+    if train_device == "cuda":
+        torch.set_num_threads(1)
+    else:
+        torch.set_num_threads(max(1, (os.cpu_count() or 1) // max(num_envs, 1)))
+
+    print(
+        f"Training with {num_envs} parallel SUMO workers on device={train_device} "
+        f"(n_steps={rollout_steps}, batch_size={batch_size}, n_epochs={n_epochs})"
+    )
 
     # ------------------------------------------------------------------
     # 1. Vectorised training environment
     # ------------------------------------------------------------------
-    env = DummyVecEnv([make_env()])
+    env_fns = [make_env(port=base_port + i) for i in range(num_envs)]
+    env = SubprocVecEnv(env_fns, start_method="spawn") if num_envs > 1 else DummyVecEnv(env_fns)
     norm_path = "vec_normalize.pkl"
     if os.path.exists(norm_path):
         print(f"Loading existing normalization stats from {norm_path}")
@@ -303,15 +465,15 @@ def train_best_model():
         eval_env,
         best_model_save_path='./logs/best_model',
         log_path='./logs/',
-        eval_freq=3000,          # evaluate every 3 000 steps
-        n_eval_episodes=3,
+        eval_freq=max(3000 // num_envs, 1),
+        n_eval_episodes=5,
         deterministic=True,
         render=False,
         verbose=1,
     )
 
     checkpoint_callback = CheckpointCallback(
-        save_freq=25_000,
+        save_freq=max(25_000 // num_envs, 1),
         save_path='./logs/checkpoints/',
         name_prefix='ppo_traffic',
         verbose=1,
@@ -325,10 +487,20 @@ def train_best_model():
         net_arch=dict(pi=[512, 512, 256], vf=[512, 512, 256]),
     )
 
-    checkpoint_path = "logs/checkpoints/ppo_traffic_2000000_steps.zip"
-    if os.path.exists(checkpoint_path):
+    checkpoint_path = latest_checkpoint()
+    if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Resuming training from {checkpoint_path}")
-        model = PPO.load(checkpoint_path, env=env, tensorboard_log="./traffic_tensorboard/")
+        model = PPO.load(
+            checkpoint_path,
+            env=env,
+            tensorboard_log="./traffic_tensorboard/",
+            device=train_device,
+            custom_objects={
+                "n_steps": rollout_steps,
+                "batch_size": batch_size,
+                "n_epochs": n_epochs,
+            },
+        )
         # Keep some learning signal so the policy can move past the plateau.
         fine_tune_lr = linear_schedule(5e-5, 5e-6)
         model.learning_rate = fine_tune_lr
@@ -340,15 +512,16 @@ def train_best_model():
             env,
             verbose=1,
             learning_rate=linear_schedule(3e-4, 1e-5),
-            n_steps=4096,
-            batch_size=256,
-            n_epochs=15,
+            n_steps=rollout_steps,
+            batch_size=batch_size,
+            n_epochs=n_epochs,
             gamma=0.995,
             gae_lambda=0.95,
             clip_range=0.2,
             ent_coef=0.005,
             vf_coef=0.5,
             max_grad_norm=0.5,
+            device=train_device,
             policy_kwargs=policy_kwargs,
             tensorboard_log="./traffic_tensorboard/",
         )

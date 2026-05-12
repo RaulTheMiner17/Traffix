@@ -31,6 +31,14 @@ class StaticSUMOController:
         self.data_lock = data_lock
         self.proc = None
         self.current_phase = 0
+        self.sub_phase = "straight"
+        self.is_yellow = False
+        self.yellow_start_time = 0
+        self.state_start_time = time.time()
+        self.yellow_duration = 3
+        self.straight_duration = 30
+        self.left_turn_duration = 0
+        self.right_turn_duration = 0
         self.time_since_switch = 0
         self.lanes = ["N2J_0", "S2J_0", "E2J_0", "W2J_0"]
         self.tls_id = "J0"
@@ -43,6 +51,11 @@ class StaticSUMOController:
         self.density_history = collections.deque(maxlen=30)
         self.wait_time_history = collections.deque(maxlen=30)
         self.vehicle_count_history = collections.deque(maxlen=30)
+        self.latest_queue = 0.0
+        self.latest_density = 0.0
+        self.latest_wait = 0.0
+        self.latest_speed = 1.0
+        self.latest_vehicle_count = 0
         self.lock = threading.Lock()
         self.start_time = time.time()
         self.phase_switches = 0
@@ -74,14 +87,15 @@ class StaticSUMOController:
             self.is_running = True
             self.conn.trafficlight.setPhase(self.tls_id, 0)
             sim_step = 0
-            yellow_duration = 3
+            loop_sleep_s = 0.1
+            yellow_duration_steps = max(1, int(self.yellow_duration / loop_sleep_s))
             is_yellow = False
             yellow_start = 0
             
             while self.is_running and sim_step < self.max_steps:
                 self.conn.simulationStep()
                 
-                time.sleep(0.1)
+                time.sleep(loop_sleep_s)
                 
                 sim_step += 1
                 self.time_since_switch += 1
@@ -117,9 +131,15 @@ class StaticSUMOController:
                     avg_q = sum(queues) / len(queues) if queues else 0
                     avg_d = sum(densities) / len(densities) if densities else 0
                     avg_w = sum(wait_times) / len(wait_times) if wait_times else 0
+                    avg_s = max(0.1, 1.0 - avg_d)
                     total_v = sum([self.conn.lane.getLastStepVehicleNumber(lane) for lane in self.lanes])
 
                 with self.lock:
+                    self.latest_queue = float(avg_q)
+                    self.latest_density = float(avg_d * 100)
+                    self.latest_wait = float(avg_w)
+                    self.latest_speed = float(avg_s if self.vehicle_data is not None else max(0.1, 1.0 - avg_d))
+                    self.latest_vehicle_count = int(total_v)
                     self.queue_history.append(round(avg_q, 2))
                     self.density_history.append(round(avg_d * 100, 1))
                     self.wait_time_history.append(round(avg_w, 1))
@@ -128,22 +148,30 @@ class StaticSUMOController:
                 # ==========================================
                 # SIGNAL LOGIC (FIXED 30s CYCLIC TIMING)
                 # ==========================================
-                target_green_time = 30
+                target_green_time = max(1, int(30 / loop_sleep_s))
 
                 if self.time_since_switch >= target_green_time and not is_yellow:
                     is_yellow = True
+                    self.is_yellow = True
                     yellow_start = sim_step
+                    self.yellow_start_time = time.time()
+                    self.state_start_time = time.time()
                     yellow_phase_idx = 1 if self.current_phase == 0 else 3
                     self.conn.trafficlight.setPhase(self.tls_id, yellow_phase_idx)
 
-                if is_yellow and (sim_step - yellow_start) >= yellow_duration:
+                if is_yellow and (sim_step - yellow_start) >= yellow_duration_steps:
                     self.current_phase = 1 - self.current_phase
+                    self.sub_phase = "straight"
                     green_phase_idx = 0 if self.current_phase == 0 else 2
                     self.conn.trafficlight.setPhase(self.tls_id, green_phase_idx)
                     self.time_since_switch = 0
                     is_yellow = False
+                    self.is_yellow = False
+                    self.state_start_time = time.time()
                     with self.lock:
                         self.phase_switches += 1
+                    if hasattr(self, '_metrics_cb') and self._metrics_cb:
+                        self._metrics_cb()
 
             self.conn.close()
             
@@ -157,10 +185,11 @@ class StaticSUMOController:
 
     def get_metrics(self):
         with self.lock:
-            avg_q = np.mean(list(self.queue_history)) if self.queue_history else 0
-            avg_d = np.mean(list(self.density_history)) if self.density_history else 0
-            avg_w = np.mean(list(self.wait_time_history)) if self.wait_time_history else 0
-            total_v = int(np.mean(list(self.vehicle_count_history))) if self.vehicle_count_history else 0
+            avg_q = self.latest_queue if self.queue_history else 0
+            avg_d = self.latest_density if self.density_history else 0
+            avg_w = self.latest_wait if self.wait_time_history else 0
+            avg_s = self.latest_speed if self.vehicle_count_history else 1.0
+            total_v = self.latest_vehicle_count if self.vehicle_count_history else 0
             uptime = time.time() - self.start_time
 
             return {
@@ -173,9 +202,10 @@ class StaticSUMOController:
                 'realtime': {
                     'avg_queue_length': round(avg_q, 2),
                     'avg_density_pct': round(avg_d, 1),
-                    'avg_speed_factor': max(0.1, 1.0 - avg_d / 100.0),
+                    'avg_speed_factor': round(max(0.1, avg_s), 2),
                     'est_wait_time_s': round(avg_w, 1),
-                    'idle_emissions_factor': round((avg_d / 100.0) * (1.0 - (1.0 - avg_d/100.0)), 3),
+                    'idle_emissions_factor': round((avg_d / 100.0) * (1.0 - max(0.1, avg_s)), 3),
+                    'throughput_vpm': round(max(0.1, avg_s) * total_v * 3, 1),
                 },
                 'per_direction': {'N': 0, 'S': 0, 'E': 0, 'W': 0},
                 'timeline': {
@@ -183,6 +213,10 @@ class StaticSUMOController:
                     'density': list(self.density_history),
                     'wait_time': list(self.wait_time_history),
                     'vehicles': list(self.vehicle_count_history),
+                    'throughput': [
+                        round(max(0.1, 1.0 - (density / 100.0)) * vehicles * 3, 1)
+                        for density, vehicles in zip(self.density_history, self.vehicle_count_history)
+                    ],
                     'labels': [f'{i}s' for i in range(len(self.queue_history))]
                 }
             }

@@ -29,6 +29,62 @@ document.addEventListener('DOMContentLoaded', function () {
             x: { grid: { color: '#282828' }, ticks: { color: '#727272', maxRotation: 45, maxTicksLimit: 15 } }
         }
     };
+    const timelineChartOpts = {
+        responsive: true,
+        maintainAspectRatio: true,
+        animation: { duration: 400 },
+        plugins: { legend: { labels: { color: '#b3b3b3', boxWidth: 12 } } },
+        scales: {
+            throughput: {
+                type: 'linear',
+                position: 'left',
+                beginAtZero: true,
+                suggestedMax: 120,
+                grid: { color: '#282828' },
+                ticks: { color: '#727272' },
+                title: { display: true, text: 'vehicles/min', color: '#727272' }
+            },
+            queue: {
+                type: 'linear',
+                position: 'right',
+                beginAtZero: true,
+                suggestedMax: 20,
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#727272' },
+                title: { display: true, text: 'queue', color: '#727272' }
+            },
+            x: { grid: { color: '#282828' }, ticks: { color: '#727272', maxRotation: 45, maxTicksLimit: 15 } }
+        }
+    };
+    const densityWaitChartOpts = {
+        responsive: true,
+        maintainAspectRatio: true,
+        animation: { duration: 400 },
+        plugins: { legend: { labels: { color: '#b3b3b3', boxWidth: 12 } } },
+        scales: {
+            density: {
+                type: 'linear',
+                position: 'left',
+                beginAtZero: true,
+                suggestedMax: 100,
+                max: 100,
+                grid: { color: '#282828' },
+                ticks: { color: '#727272' },
+                title: { display: true, text: 'density %', color: '#727272' }
+            },
+            wait: {
+                type: 'linear',
+                position: 'right',
+                beginAtZero: true,
+                suggestedMax: 120,
+                max: 180,
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#727272' },
+                title: { display: true, text: 'wait seconds', color: '#727272' }
+            },
+            x: { grid: { color: '#282828' }, ticks: { color: '#727272', maxRotation: 45, maxTicksLimit: 15 } }
+        }
+    };
 
     let timelineChart = null;
     let densityWaitChart = null;
@@ -44,13 +100,13 @@ document.addEventListener('DOMContentLoaded', function () {
             data: {
                 labels: [],
                 datasets: [
-                    { label: 'Vehicles Now (RL)', data: [], borderColor: '#1DB954', backgroundColor: 'rgba(29,185,84,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Avg Queue (RL)', data: [], borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Vehicles Now (Static)', data: [], borderColor: '#1DB954', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
-                    { label: 'Avg Queue (Static)', data: [], borderColor: '#f97316', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
+                    { label: 'Throughput vpm (RL)', yAxisID: 'throughput', data: [], borderColor: '#1DB954', backgroundColor: 'rgba(29,185,84,0.08)', fill: false, tension: 0.25 },
+                    { label: 'Avg Queue (RL)', yAxisID: 'queue', data: [], borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.08)', fill: false, tension: 0.25 },
+                    { label: 'Throughput vpm (Static)', yAxisID: 'throughput', data: [], borderColor: '#1DB954', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.25 },
+                    { label: 'Avg Queue (Static)', yAxisID: 'queue', data: [], borderColor: '#f97316', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.25 }
                 ]
             },
-            options: chartOpts
+            options: timelineChartOpts
         });
 
         densityWaitChart = new Chart(ctx2, {
@@ -58,13 +114,13 @@ document.addEventListener('DOMContentLoaded', function () {
             data: {
                 labels: [],
                 datasets: [
-                    { label: 'Density (%) (RL)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Wait Time (s) (RL)', data: [], borderColor: '#fbbf24', backgroundColor: 'rgba(251,191,36,0.1)', fill: true, tension: 0.3 },
-                    { label: 'Density (%) (Static)', data: [], borderColor: '#ef4444', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 },
-                    { label: 'Wait Time (s) (Static)', data: [], borderColor: '#fbbf24', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.3 }
+                    { label: 'Density (%) (RL)', yAxisID: 'density', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', fill: false, tension: 0.25 },
+                    { label: 'Wait Time (s) (RL)', yAxisID: 'wait', data: [], borderColor: '#fbbf24', backgroundColor: 'rgba(251,191,36,0.08)', fill: false, tension: 0.25 },
+                    { label: 'Density (%) (Static)', yAxisID: 'density', data: [], borderColor: '#ef4444', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.25 },
+                    { label: 'Wait Time (s) (Static)', yAxisID: 'wait', data: [], borderColor: '#fbbf24', borderDash: [5, 5], backgroundColor: 'rgba(0,0,0,0)', fill: false, tension: 0.25 }
                 ]
             },
-            options: chartOpts
+            options: densityWaitChartOpts
         });
     }
 
@@ -75,6 +131,30 @@ document.addEventListener('DOMContentLoaded', function () {
         if (h > 0) return `${h}h ${m}m`;
         if (m > 0) return `${m}m ${sec}s`;
         return `${sec}s`;
+    }
+
+    function alignSeries(values, targetLength) {
+        const arr = Array.isArray(values) ? values.slice(-targetLength) : [];
+        while (arr.length < targetLength) arr.unshift(null);
+        return arr;
+    }
+
+    function setImprovementText(metricId, text) {
+        const valueEl = document.getElementById(metricId);
+        const subtextEl = valueEl?.closest('.stat-card')?.querySelector('.stat-subtext');
+        if (subtextEl) subtextEl.textContent = text;
+    }
+
+    function lowerIsBetterText(rlValue, staticValue) {
+        if (!Number.isFinite(rlValue) || !Number.isFinite(staticValue) || staticValue <= 0) return '';
+        const improvement = Math.max(0, ((staticValue - rlValue) / staticValue) * 100);
+        return `${improvement.toFixed(1)}% lower than Static`;
+    }
+
+    function higherIsBetterText(rlValue, staticValue) {
+        if (!Number.isFinite(rlValue) || !Number.isFinite(staticValue) || staticValue <= 0) return '';
+        const improvement = Math.max(0, ((rlValue - staticValue) / staticValue) * 100);
+        return `${improvement.toFixed(1)}% higher than Static`;
     }
 
     function updateDashboard() {
@@ -103,12 +183,19 @@ document.addEventListener('DOMContentLoaded', function () {
                 const rt_static = d.static.realtime;
                 if (el('m-wait')) el('m-wait').textContent = `${rt_rl.est_wait_time_s.toFixed(1)}s / ${rt_static.est_wait_time_s.toFixed(1)}s`;
                 if (el('m-queue')) el('m-queue').textContent = `${rt_rl.avg_queue_length.toFixed(1)} / ${rt_static.avg_queue_length.toFixed(1)}`;
-                if (el('m-throughput')) el('m-throughput').textContent = `${(rt_rl.avg_speed_factor * d.total_vehicles_now * 3).toFixed(1)} / ${(rt_static.avg_speed_factor * d.total_vehicles_now * 3).toFixed(1)}`;
+                const rlThroughput = rt_rl.throughput_vpm ?? (rt_rl.avg_speed_factor * d.total_vehicles_now * 3);
+                const staticThroughput = rt_static.throughput_vpm ?? (rt_static.avg_speed_factor * d.total_vehicles_now * 3);
+                if (el('m-throughput')) el('m-throughput').textContent = `${rlThroughput.toFixed(1)} / ${staticThroughput.toFixed(1)}`;
+                setImprovementText('m-wait', lowerIsBetterText(rt_rl.est_wait_time_s, rt_static.est_wait_time_s));
+                setImprovementText('m-queue', lowerIsBetterText(rt_rl.avg_queue_length, rt_static.avg_queue_length));
+                setImprovementText('m-throughput', higherIsBetterText(rlThroughput, staticThroughput));
 
                 // Secondary metrics
                 if (el('m-density')) el('m-density').textContent = `${rt_rl.avg_density_pct.toFixed(1)}% / ${rt_static.avg_density_pct.toFixed(1)}%`;
                 if (el('m-speed')) el('m-speed').textContent = `${rt_rl.avg_speed_factor.toFixed(2)} / ${rt_static.avg_speed_factor.toFixed(2)}`;
                 if (el('m-emissions')) el('m-emissions').textContent = `${rt_rl.idle_emissions_factor.toFixed(3)} / ${rt_static.idle_emissions_factor.toFixed(3)}`;
+                setImprovementText('m-speed', higherIsBetterText(rt_rl.avg_speed_factor, rt_static.avg_speed_factor));
+                setImprovementText('m-emissions', lowerIsBetterText(rt_rl.idle_emissions_factor, rt_static.idle_emissions_factor));
 
                 // Per-direction counts (same for both systems)
                 ['N', 'S', 'E', 'W'].forEach(dir => {
@@ -121,19 +208,23 @@ document.addEventListener('DOMContentLoaded', function () {
                 const tl_rl = d.rl.timeline;
                 const tl_static = d.static.timeline;
                 if (timelineChart && tl_rl.labels.length > 0) {
-                    timelineChart.data.labels = tl_rl.labels;
-                    timelineChart.data.datasets[0].data = tl_rl.vehicles;
-                    timelineChart.data.datasets[1].data = tl_rl.queue;
-                    timelineChart.data.datasets[2].data = tl_static.vehicles;
-                    timelineChart.data.datasets[3].data = tl_static.queue;
+                    const labels = tl_rl.labels;
+                    const n = labels.length;
+                    timelineChart.data.labels = labels;
+                    timelineChart.data.datasets[0].data = alignSeries(tl_rl.throughput || tl_rl.vehicles, n);
+                    timelineChart.data.datasets[1].data = alignSeries(tl_rl.queue, n);
+                    timelineChart.data.datasets[2].data = alignSeries(tl_static.throughput || tl_static.vehicles, n);
+                    timelineChart.data.datasets[3].data = alignSeries(tl_static.queue, n);
                     timelineChart.update('none');
                 }
                 if (densityWaitChart && tl_rl.labels.length > 0) {
-                    densityWaitChart.data.labels = tl_rl.labels;
-                    densityWaitChart.data.datasets[0].data = tl_rl.density;
-                    densityWaitChart.data.datasets[1].data = tl_rl.wait_time;
-                    densityWaitChart.data.datasets[2].data = tl_static.density;
-                    densityWaitChart.data.datasets[3].data = tl_static.wait_time;
+                    const labels = tl_rl.labels;
+                    const n = labels.length;
+                    densityWaitChart.data.labels = labels;
+                    densityWaitChart.data.datasets[0].data = alignSeries(tl_rl.density, n);
+                    densityWaitChart.data.datasets[1].data = alignSeries(tl_rl.wait_time, n);
+                    densityWaitChart.data.datasets[2].data = alignSeries(tl_static.density, n);
+                    densityWaitChart.data.datasets[3].data = alignSeries(tl_static.wait_time, n);
                     densityWaitChart.update('none');
                 }
             })
